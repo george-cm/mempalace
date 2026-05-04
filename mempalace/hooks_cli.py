@@ -14,7 +14,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-SAVE_INTERVAL = 15
+SAVE_INTERVAL = 20
 STATE_DIR = Path.home() / ".mempalace" / "hook_state"
 
 
@@ -291,216 +291,25 @@ def _maybe_auto_ingest():
             pass
 
 
-def _mine_sync():
-    """Synchronously mine MEMPAL_DIR (precompact path).
+SUPPORTED_HARNESSES = {"claude-code", "codex", "devin"}
 
-    Transcript convos are ingested separately via ``_ingest_transcript``
-    in ``hook_precompact`` — keeping them out of this function avoids
-    timeout stacking against the harness 30s ceiling (#1231 review).
-    """
-    targets = _get_mine_targets()
-    if not targets:
-        return
+
+def _increment_stop_counter(session_id: str) -> int:
+    """Increment and return a stop-event counter (used when transcript_path is unavailable)."""
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    log_path = STATE_DIR / "hook.log"
-    for mine_dir, mode in targets:
+    counter_file = STATE_DIR / f"{session_id}_stop_count"
+    count = 0
+    if counter_file.is_file():
         try:
-            with open(log_path, "a") as log_f:
-                subprocess.run(
-                    [
-                        _mempalace_python(),
-                        "-m",
-                        "mempalace",
-                        "mine",
-                        mine_dir,
-                        "--mode",
-                        mode,
-                    ],
-                    stdout=log_f,
-                    stderr=log_f,
-                    timeout=60,
-                )
-        except (OSError, subprocess.TimeoutExpired):
-            pass
-
-
-def _desktop_toast(body: str, title: str = "MemPalace"):
-    """Send a desktop notification via notify-send. Fails silently."""
+            count = int(counter_file.read_text().strip())
+        except (ValueError, OSError):
+            count = 0
+    count += 1
     try:
-        subprocess.Popen(
-            ["notify-send", "--app-name=MemPalace", "--icon=brain", title, body],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        counter_file.write_text(str(count), encoding="utf-8")
     except OSError:
         pass
-
-
-def _extract_recent_messages(transcript_path: str, count: int = _RECENT_MSG_COUNT) -> list[str]:
-    """Extract the last N user messages from a JSONL transcript."""
-    path = Path(transcript_path).expanduser()
-    if not path.is_file():
-        return []
-    messages = []
-    try:
-        with open(path, encoding="utf-8", errors="replace") as f:
-            for line in f:
-                try:
-                    entry = json.loads(line)
-                    # Claude Code format
-                    msg = entry.get("message") or entry.get("event_message") or {}
-                    if isinstance(msg, dict) and msg.get("role") == "user":
-                        content = msg.get("content", "")
-                        if isinstance(content, list):
-                            content = " ".join(
-                                b.get("text", "") for b in content if isinstance(b, dict)
-                            )
-                        if not isinstance(content, str) or not content.strip():
-                            continue
-                        if "<command-message>" in content or "<system-reminder>" in content:
-                            continue
-                        messages.append(content.strip()[:200])
-                    # Codex CLI format
-                    elif entry.get("type") == "event_msg":
-                        payload = entry.get("payload", {})
-                        if isinstance(payload, dict) and payload.get("type") == "user_message":
-                            text = payload.get("message", "")
-                            if isinstance(text, str) and text.strip():
-                                if "<command-message>" not in text:
-                                    messages.append(text.strip()[:200])
-                except (json.JSONDecodeError, AttributeError):
-                    pass
-    except OSError:
-        return []
-    return messages[-count:]
-
-
-_THEME_STOPWORDS = frozenset(
-    "the a an and or but in on at to for of is it i me my you your we our "
-    "this that with from by was were be been are not no yes can do did dont "
-    "will would should could have has had lets let just also like so if then "
-    "ok okay sure yeah hey hi here there what when where how why which some "
-    "all any each every about into out up down over after before between "
-    "get got make made need want use used using check look see run try "
-    "know think right now still already really very much more most too "
-    "file files code one two new first last next thing things way well".split()
-)
-
-
-def _extract_themes(messages: list[str], max_themes: int = 3) -> list[str]:
-    """Pull 2-3 distinctive topic words from recent messages.
-
-    Note: stopword list is English-only; non-English corpora will produce noisy themes.
-    """
-    from collections import Counter
-
-    words: Counter[str] = Counter()
-    for msg in messages:
-        for word in msg.lower().split():
-            # Strip punctuation, keep words 4+ chars
-            clean = word.strip(".,;:!?\"'`()[]{}#<>/\\-_=+@$%^&*~")
-            if len(clean) >= 4 and clean not in _THEME_STOPWORDS and clean.isalpha():
-                words[clean] += 1
-    return [w for w, _ in words.most_common(max_themes)]
-
-
-def _save_diary_direct(
-    transcript_path: str,
-    session_id: str,
-    wing: str = "",
-    toast: bool = False,
-) -> dict:
-    """Write a diary checkpoint by calling the tool function directly (no MCP roundtrip).
-
-    If `wing` is set, the entry lands in that wing (typically the project wing
-    derived from the transcript path). Otherwise falls back to `tool_diary_write`'s
-    default of `wing_session-hook`.
-
-    Returns {"count": N, "themes": [...]} on success, {"count": 0} on failure.
-    """
-    messages = _extract_recent_messages(transcript_path)
-    if not messages:
-        _log("No recent messages to save")
-        return {"count": 0}
-
-    themes = _extract_themes(messages)
-
-    # Build a compressed diary entry from recent conversation
-    now = datetime.now()
-    topics = "|".join(m[:80] for m in messages[-10:])
-    entry = (
-        f"CHECKPOINT:{now.strftime('%Y-%m-%d')}|session:{session_id}"
-        f"|msgs:{len(messages)}|recent:{topics}"
-    )
-
-    try:
-        from .mcp_server import tool_diary_write
-
-        result = tool_diary_write(
-            agent_name="session-hook",
-            entry=entry,
-            topic="checkpoint",
-            wing=wing,
-        )
-        if result.get("success"):
-            _log(f"Diary checkpoint saved: {result.get('entry_id', '?')}")
-            # Write state for ack tool to read
-            try:
-                ack_file = STATE_DIR / "last_checkpoint"
-                ack_file.write_text(
-                    json.dumps({"msgs": len(messages), "ts": now.isoformat()}),
-                    encoding="utf-8",
-                )
-            except OSError:
-                pass
-            if toast:
-                _desktop_toast(f"Checkpoint saved \u2014 {len(messages)} messages archived")
-            return {"count": len(messages), "themes": themes}
-        else:
-            _log(f"Diary checkpoint failed: {result.get('error', 'unknown')}")
-    except Exception as e:
-        _log(f"Diary checkpoint error: {e}")
-    return {"count": 0}
-
-
-def _ingest_transcript(transcript_path: str):
-    """Mine a Claude Code session transcript into the palace as a conversation."""
-    path = Path(transcript_path).expanduser()
-    if not path.is_file() or path.stat().st_size < 100:
-        return
-
-    from .config import MempalaceConfig
-
-    try:
-        MempalaceConfig()  # validate config loads
-    except Exception:
-        return
-
-    try:
-        log_path = STATE_DIR / "hook.log"
-        STATE_DIR.mkdir(parents=True, exist_ok=True)
-        with open(log_path, "a") as log_f:
-            subprocess.Popen(
-                [
-                    _mempalace_python(),
-                    "-m",
-                    "mempalace",
-                    "mine",
-                    str(path.parent),
-                    "--mode",
-                    "convos",
-                    "--wing",
-                    "sessions",
-                ],
-                stdout=log_f,
-                stderr=log_f,
-            )
-        _log(f"Transcript ingest started: {path.name}")
-    except OSError:
-        pass
-
-
-SUPPORTED_HARNESSES = {"claude-code", "codex"}
+    return count
 
 
 def _parse_harness_input(data: dict, harness: str) -> dict:
@@ -508,8 +317,9 @@ def _parse_harness_input(data: dict, harness: str) -> dict:
     if harness not in SUPPORTED_HARNESSES:
         print(f"Unknown harness: {harness}", file=sys.stderr)
         sys.exit(1)
+    default_session = "devin" if harness == "devin" else "unknown"
     return {
-        "session_id": _sanitize_session_id(str(data.get("session_id", "unknown"))),
+        "session_id": _sanitize_session_id(str(data.get("session_id", default_session))),
         "stop_hook_active": data.get("stop_hook_active", False),
         "transcript_path": str(data.get("transcript_path", "")),
     }
@@ -579,8 +389,11 @@ def hook_stop(data: dict, harness: str):
             _output({})
             return
 
-    # Count human messages
-    exchange_count = _count_human_messages(transcript_path)
+    # Count exchanges: from JSONL transcript if available, otherwise simple turn counter
+    if transcript_path:
+        exchange_count = _count_human_messages(transcript_path)
+    else:
+        exchange_count = _increment_stop_counter(session_id)
 
     # Track last save point
     STATE_DIR.mkdir(parents=True, exist_ok=True)

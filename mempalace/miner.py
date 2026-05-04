@@ -63,6 +63,7 @@ SKIP_FILENAMES = {
     "mempal.yml",
     ".gitignore",
     "package-lock.json",
+    "package.json",       # manifest/version pins — no semantic value
 }
 
 CHUNK_SIZE = 800  # chars per drawer
