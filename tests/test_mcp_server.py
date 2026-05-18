@@ -146,6 +146,43 @@ class TestHandleRequest:
         )
         assert resp["error"]["code"] == -32601
 
+    def test_string_arguments_are_parsed_as_json(self, monkeypatch, config, palace_path, seeded_kg):
+        """BUG-001: Devin long-session bug sends arguments as JSON string not map.
+
+        The server must parse the string and dispatch correctly rather than
+        failing with 'invalid type: string … expected a map'.
+        """
+        _patch_mcp_server(monkeypatch, config, seeded_kg)
+        from mempalace.mcp_server import handle_request
+
+        _client, _col = _get_collection(palace_path, create=True)
+        del _client
+        # arguments serialised as a JSON string instead of a map
+        args_as_string = json.dumps({"wing": "test_wing"})
+        resp = handle_request(
+            {
+                "method": "tools/call",
+                "id": 99,
+                "params": {"name": "mempalace_list_rooms", "arguments": args_as_string},
+            }
+        )
+        assert "error" not in resp, f"Expected success, got error: {resp.get('error')}"
+        assert resp["result"] is not None
+
+    def test_invalid_string_arguments_return_error(self):
+        """BUG-001: Non-JSON string arguments must return a structured error, not crash."""
+        from mempalace.mcp_server import handle_request
+
+        resp = handle_request(
+            {
+                "method": "tools/call",
+                "id": 100,
+                "params": {"name": "mempalace_status", "arguments": "not valid json {{"},
+            }
+        )
+        assert "error" in resp
+        assert resp["error"]["code"] == -32602  # invalid params
+
     def test_unknown_method(self):
         from mempalace.mcp_server import handle_request
 

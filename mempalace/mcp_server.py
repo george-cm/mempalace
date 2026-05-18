@@ -1842,6 +1842,29 @@ def handle_request(request):
     elif method == "tools/call":
         tool_name = params.get("name")
         tool_args = params.get("arguments") or {}
+        # BUG-001: Devin long-session serialisation bug sends arguments as a
+        # JSON-encoded string instead of a parsed map.  Normalise defensively.
+        if isinstance(tool_args, str):
+            try:
+                tool_args = json.loads(tool_args)
+            except json.JSONDecodeError:
+                return {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "error": {
+                        "code": -32602,
+                        "message": f"arguments must be a JSON object, got unparseable string: {tool_args[:100]}",
+                    },
+                }
+            if not isinstance(tool_args, dict):
+                return {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "error": {
+                        "code": -32602,
+                        "message": "arguments must be a JSON object (map), not a scalar",
+                    },
+                }
         if tool_name not in TOOLS:
             return {
                 "jsonrpc": "2.0",
