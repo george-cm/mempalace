@@ -6,6 +6,7 @@
 
 **Severity:** High
 **Reported:** 2026-05-18
+**Resolved:** 2026-05-18 — commit `8de2d4f` (`fix(mcp): parse JSON-string arguments defensively`)
 **Affects:** All parameterised MCP tool calls (`mempalace_diary_write`, `mempalace_add_drawer`, `mempalace_search`, etc.)
 
 ### Symptom
