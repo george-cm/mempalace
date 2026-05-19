@@ -1287,3 +1287,44 @@ def test_cmd_repair_from_sqlite_success_does_not_exit(mock_config_cls, tmp_path)
     with patch("mempalace.repair.rebuild_from_sqlite", return_value=fake_counts):
         # Should return cleanly; no SystemExit raised.
         cmd_repair(args)
+
+
+# ── WARN-007 — gitignore encoding ────────────────────────────────────
+
+
+def test_ensure_gitignore_roundtrips_non_ascii_content(tmp_path):
+    """_ensure_mempalace_files_gitignored reads/writes .gitignore as UTF-8.
+
+    Without ``encoding='utf-8'`` on both ``gitignore.read_text()`` and
+    ``open(gitignore, 'a')`` (WARN-007), a .gitignore that already
+    contains a non-ASCII comment (e.g. a Japanese project name) is
+    mis-decoded on narrow-locale Windows and the subsequent append can
+    raise ``UnicodeDecodeError`` or silently corrupt the file.
+
+    The fix adds ``encoding='utf-8'`` to both calls so the content
+    round-trips verbatim on every platform.
+    """
+    from mempalace.cli import _ensure_mempalace_files_gitignored
+
+    # Set up a minimal git repo directory.
+    project_dir = tmp_path / "myproject"
+    project_dir.mkdir()
+    (project_dir / ".git").mkdir()
+
+    # Write a .gitignore that contains non-ASCII content (UTF-8).
+    non_ascii_comment = "# Projet café · 日本語\n"
+    gitignore = project_dir / ".gitignore"
+    gitignore.write_bytes(non_ascii_comment.encode("utf-8"))
+
+    # Must not raise; should append the MemPalace entries.
+    result = _ensure_mempalace_files_gitignored(str(project_dir))
+    assert result is True, "should have updated .gitignore"
+
+    # The original non-ASCII comment must still be present verbatim.
+    updated = gitignore.read_bytes().decode("utf-8")
+    assert non_ascii_comment.strip() in updated, (
+        f"Non-ASCII gitignore comment was corrupted; got: {updated!r}"
+    )
+    # The MemPalace entries must have been appended.
+    assert "mempalace.yaml" in updated
+    assert "entities.json" in updated

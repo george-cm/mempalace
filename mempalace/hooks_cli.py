@@ -8,6 +8,7 @@ Supported harnesses: claude-code, codex (extensible to cursor, gemini, etc.)
 
 import hashlib
 import json
+import logging
 import os
 import re
 import subprocess
@@ -15,6 +16,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 SAVE_INTERVAL = 20
 STATE_DIR = Path.home() / ".mempalace" / "hook_state"
@@ -333,14 +336,25 @@ def _pid_alive(pid: int) -> bool:
 
 
 def _mine_already_running(cmd: list[str]) -> bool:
-    """Return True if a previous mine for ``cmd``'s target is still alive."""
+    """Return True if a previous mine for ``cmd``'s target is still alive.
+
+    A file that contains a non-numeric, non-empty value is treated as
+    ``"running"`` — it means the spawner wrote the ``"starting"`` sentinel
+    and has not yet replaced it with the real PID.  Treating an empty file
+    as *not* running is intentional: an empty file means the slot was just
+    atomically created by ``_claim_mine_slot`` but the sentinel has not
+    been written yet (a vanishingly short window that only appears if
+    ``_spawn_mine`` itself is interrupted between the two writes).
+    """
     pid_file = _pid_file_for_cmd(cmd)
     try:
         recorded = pid_file.read_text(encoding="utf-8").strip()
     except OSError:
         return False
+    if not recorded:
+        return False  # empty file — treat as no owner
     if not recorded.isdigit():
-        return False
+        return True  # sentinel such as "starting" — mine is about to start
     return _pid_alive(int(recorded))
 
 
@@ -399,6 +413,14 @@ def _spawn_mine(cmd: list) -> None:
     if pid_file is None:
         _log(f"Skipping mine: target already running ({' '.join(cmd[-3:])})")
         return
+    # Write the sentinel immediately so any concurrent hook fire that reads
+    # this file sees a non-empty, non-numeric value and treats it as "running"
+    # (via _mine_already_running), closing the race window between slot
+    # creation (empty file) and real PID write after Popen.
+    try:
+        pid_file.write_text("starting")
+    except OSError:
+        pass
     child_env = os.environ.copy()
     child_env[_MINE_PID_FILE_ENV] = str(pid_file)
     with open(log_path, "a") as log_f:
@@ -444,6 +466,28 @@ def _maybe_auto_ingest():
         try:
             _spawn_mine([_mempalace_python(), "-m", "mempalace", "mine", mine_dir, "--mode", mode])
         except OSError:
+            pass
+
+
+def _mine_sync() -> None:
+    """Synchronously mine MEMPAL_DIR targets (used by hook_precompact).
+
+    Unlike ``_maybe_auto_ingest`` (which spawns background Popen children),
+    this call blocks until the mine finishes so project data is available
+    before compaction proceeds.  Transcript ingestion is the responsibility
+    of ``_ingest_transcript``; this function handles project files only.
+    """
+    targets = _get_mine_targets()
+    if not targets:
+        return
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = STATE_DIR / "hook.log"
+    for mine_dir, mode in targets:
+        cmd = [_mempalace_python(), "-m", "mempalace", "mine", mine_dir, "--mode", mode]
+        try:
+            with open(log_path, "a") as log_f:
+                subprocess.run(cmd, stdout=log_f, stderr=log_f, stdin=subprocess.DEVNULL)
+        except (OSError, subprocess.TimeoutExpired):
             pass
 
 
@@ -605,7 +649,8 @@ def _ingest_transcript(transcript_path: str):
 
     try:
         MempalaceConfig()  # validate config loads
-    except Exception:
+    except Exception as exc:
+        logger.warning("_ingest_transcript: MempalaceConfig validation failed: %s", exc)
         return
 
     try:
@@ -740,7 +785,8 @@ def hook_stop(data: dict, harness: str):
             config = MempalaceConfig()
             silent = config.hook_silent_save
             toast = config.hook_desktop_toast
-        except Exception:
+        except Exception as exc:
+            logger.warning("hook_stop: failed to read hook settings from config: %s", exc)
             silent = True
             toast = False
 

@@ -67,6 +67,28 @@ def test_layer0_default_path():
     assert layer.path == expected
 
 
+def test_layer0_reads_non_ascii_identity_file(tmp_path):
+    """Layer0 correctly reads an identity file containing non-ASCII characters.
+
+    Without ``encoding='utf-8'`` on the ``open(self.path, 'r')`` call
+    (WARN-007), an identity.txt written in UTF-8 with accented letters,
+    Cyrillic, or CJK can be mis-decoded on narrow-locale Windows systems.
+    The fix anchors the read stream to UTF-8 so the identity text
+    round-trips without corruption on every platform.
+    """
+    non_ascii = "Café au lait · привет мир · 日本語テスト"
+    identity_file = tmp_path / "identity.txt"
+    # Write explicitly as UTF-8 so the test is locale-independent.
+    identity_file.write_bytes(non_ascii.encode("utf-8"))
+
+    layer = Layer0(identity_path=str(identity_file))
+    text = layer.render()
+
+    assert non_ascii == text, (
+        f"Non-ASCII identity must be read back verbatim; got: {text!r}"
+    )
+
+
 # ── Layer1 — mocked chromadb ────────────────────────────────────────────
 
 

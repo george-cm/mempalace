@@ -175,6 +175,11 @@ def _capture_hook_output(hook_fn, data, harness="claude-code", state_dir=None):
     patches = [patch("mempalace.hooks_cli._output", side_effect=lambda d: buf.write(json.dumps(d)))]
     if state_dir:
         patches.append(patch("mempalace.hooks_cli.STATE_DIR", state_dir))
+        # PALACE_ROOT must also be a real directory so _palace_root_exists()
+        # returns True and hooks don't short-circuit before doing any work.
+        patches.append(patch("mempalace.hooks_cli.PALACE_ROOT", state_dir))
+        # Reset the STATE_DIR initialised flag so each test starts fresh.
+        patches.append(patch("mempalace.hooks_cli._state_dir_initialized", False))
     # Mock MempalaceConfig so tests don't depend on user's ~/.mempalace/config.json
     mock_config = MagicMock()
     type(mock_config).hook_silent_save = PropertyMock(return_value=True)
@@ -412,7 +417,9 @@ def test_output_falls_back_to_fd1_when_mcp_server_absent():
 
 def test_log_writes_to_hook_log(tmp_path):
     with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
-        _log("test message")
+        with patch("mempalace.hooks_cli.PALACE_ROOT", tmp_path):
+            with patch("mempalace.hooks_cli._state_dir_initialized", False):
+                _log("test message")
     log_path = tmp_path / "hook.log"
     assert log_path.is_file()
     content = log_path.read_text()
@@ -807,12 +814,18 @@ def test_mine_already_running_live_pid(tmp_path):
 
 
 def test_mine_already_running_corrupt_file(tmp_path):
-    """Returns False when the slot contains non-integer content."""
+    """Non-empty, non-integer slot content is treated as 'running' (WARN-009 fix).
+
+    Any non-empty, non-numeric value (including random corrupt strings) is
+    treated the same as the 'starting' sentinel — it means the slot is owned
+    by a spawner that has not yet written a real PID.  Returning True prevents
+    a concurrent hook from racing through the guard.
+    """
     pid_dir = tmp_path / "mine_pids"
     cmd = ["mempalace", "mine", "/tmp/x", "--mode", "projects"]
     _seed_slot(pid_dir, cmd, "not-a-pid")
     with patch("mempalace.hooks_cli._MINE_PID_DIR", pid_dir):
-        assert _mine_already_running(cmd) is False
+        assert _mine_already_running(cmd) is True
 
 
 def test_mine_already_running_distinct_cmds_independent(tmp_path):
@@ -1298,3 +1311,140 @@ def test_regular_file_at_palace_root_treated_as_absent(tmp_path, monkeypatch):
     # The stray file is left untouched; we never try to convert it.
     assert fake_root.is_file()
     assert fake_root.read_text() == "oops, this is a file not a directory"
+
+
+# ---------------------------------------------------------------------------
+# WARN-009: PID race sentinel fix
+# ---------------------------------------------------------------------------
+
+
+def test_mine_already_running_returns_true_for_sentinel(tmp_path):
+    """WARN-009: 'starting' sentinel in PID file must be treated as running.
+
+    Before the fix, _mine_already_running returns False for any non-digit
+    content (including the sentinel), allowing a second mine to start.
+    After the fix it returns True for non-empty, non-numeric content.
+    """
+    pid_dir = tmp_path / "mine_pids"
+    with patch("mempalace.hooks_cli._MINE_PID_DIR", pid_dir):
+        from mempalace.hooks_cli import _mine_already_running, _pid_file_for_cmd
+
+        cmd = ["mempalace", "mine", "/tmp/proj", "--mode", "projects"]
+        pid_file = _pid_file_for_cmd(cmd)
+        pid_file.parent.mkdir(parents=True, exist_ok=True)
+        pid_file.write_text("starting")  # sentinel written by the spawner
+
+        assert _mine_already_running(cmd) is True, (
+            "_mine_already_running must return True for the 'starting' sentinel "
+            "so a concurrent hook fire does not race past the guard"
+        )
+
+
+def test_mine_already_running_returns_false_for_empty(tmp_path):
+    """WARN-009: An empty PID file (shouldn't exist post-fix, but guard it) → False."""
+    pid_dir = tmp_path / "mine_pids"
+    with patch("mempalace.hooks_cli._MINE_PID_DIR", pid_dir):
+        from mempalace.hooks_cli import _mine_already_running, _pid_file_for_cmd
+
+        cmd = ["mempalace", "mine", "/tmp/proj", "--mode", "projects"]
+        pid_file = _pid_file_for_cmd(cmd)
+        pid_file.parent.mkdir(parents=True, exist_ok=True)
+        pid_file.write_text("")  # empty — no sentinel, no PID
+
+        assert _mine_already_running(cmd) is False
+
+
+def test_spawn_mine_writes_starting_sentinel_before_popen(tmp_path):
+    """WARN-009: _spawn_mine must write 'starting' to the PID file before Popen.
+
+    The sentinel prevents a concurrent hook fire from racing through
+    _mine_already_running (which treats non-empty, non-numeric as 'running').
+    """
+    pid_dir = tmp_path / "mine_pids"
+    captured_state: list = []
+
+    def _fake_popen(*args, **kwargs):
+        """Side-effect: record the PID-file content at call time."""
+        from mempalace.hooks_cli import _pid_file_for_cmd
+
+        cmd = ["mempalace", "mine", "/tmp/proj", "--mode", "projects"]
+        pid_file = _pid_file_for_cmd(cmd)
+        if pid_file.exists():
+            captured_state.append(pid_file.read_text().strip())
+        else:
+            captured_state.append("<missing>")
+        proc = MagicMock()
+        proc.pid = 7777
+        return proc
+
+    with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
+        with patch("mempalace.hooks_cli._MINE_PID_DIR", pid_dir):
+            with patch("mempalace.hooks_cli.subprocess.Popen", side_effect=_fake_popen):
+                from mempalace.hooks_cli import _spawn_mine
+
+                _spawn_mine(["mempalace", "mine", "/tmp/proj", "--mode", "projects"])
+
+    assert captured_state, "Popen was not called — _spawn_mine bailed out unexpectedly"
+    assert captured_state[0] == "starting", (
+        f"PID file must contain 'starting' when Popen is invoked, got {captured_state[0]!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# WARN-010: silent except handlers — hooks_cli logger warnings
+# ---------------------------------------------------------------------------
+
+
+def test_ingest_transcript_warns_on_config_error(tmp_path):
+    """WARN-010: _ingest_transcript must log a warning when MempalaceConfig raises."""
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text("x" * 200)  # passes the > 100 byte gate
+
+    with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
+        with patch("mempalace.hooks_cli._MINE_PID_DIR", tmp_path / "mine_pids"):
+            with patch("mempalace.config.MempalaceConfig", side_effect=Exception("cfg-error")):
+                with patch("mempalace.hooks_cli.logger", create=True) as mock_logger:
+                    from mempalace.hooks_cli import _ingest_transcript
+
+                    _ingest_transcript(str(transcript))
+
+    mock_logger.warning.assert_called_once()
+    assert "cfg-error" in str(mock_logger.warning.call_args)
+
+
+def test_hook_stop_warns_on_settings_config_error(tmp_path, monkeypatch):
+    """WARN-010: hook_stop must log a warning when MempalaceConfig raises reading settings (line ~743)."""
+    fake_palace = tmp_path / "mempalace"
+    fake_palace.mkdir()
+    state_dir = tmp_path / "hook_state"
+    state_dir.mkdir()
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text("x" * 200)
+
+    monkeypatch.setattr(hooks_cli_mod, "PALACE_ROOT", fake_palace)
+    monkeypatch.setattr(hooks_cli_mod, "STATE_DIR", state_dir)
+    monkeypatch.setattr(hooks_cli_mod, "_state_dir_initialized", False)
+    monkeypatch.setattr(hooks_cli_mod, "_MINE_PID_DIR", tmp_path / "mine_pids")
+
+    import contextlib
+    import io
+
+    buf = io.StringIO()
+    with patch("mempalace.hooks_cli._count_human_messages", return_value=SAVE_INTERVAL):
+        with patch("mempalace.config.MempalaceConfig", side_effect=Exception("settings-error")):
+            with patch("mempalace.hooks_cli._save_diary_direct", return_value={"count": 0}):
+                with patch("mempalace.hooks_cli._ingest_transcript"):
+                    with patch("mempalace.hooks_cli._maybe_auto_ingest"):
+                        with patch("mempalace.hooks_cli.logger", create=True) as mock_logger:
+                            with contextlib.redirect_stdout(buf):
+                                hook_stop(
+                                    {
+                                        "session_id": "testsession",
+                                        "transcript_path": str(transcript),
+                                        "stop_hook_active": False,
+                                    },
+                                    "claude-code",
+                                )
+
+    mock_logger.warning.assert_called_once()
+    assert "settings-error" in str(mock_logger.warning.call_args)

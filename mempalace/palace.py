@@ -294,7 +294,7 @@ def mine_lock(source_file: str):
         lock_dir, hashlib.sha256(source_file.encode()).hexdigest()[:16] + ".lock"
     )
 
-    lf = open(lock_path, "w")
+    lf = open(lock_path, "w", encoding="utf-8")
     try:
         if os.name == "nt":
             import msvcrt
@@ -470,7 +470,7 @@ def mine_palace_lock(palace_path: str):
             os.close(fd)
         except FileExistsError:
             pass
-    lf = open(lock_path, "r+")
+    lf = open(lock_path, "r+", encoding="utf-8")
     acquired = False
     try:
         # Lock byte 0 explicitly. msvcrt.locking is byte-position dependent;

@@ -76,6 +76,36 @@ def test_paginate_ids_offset_exception_fallback():
     assert "id1" in ids
 
 
+def test_paginate_ids_fallback_deduplication_no_duplicates():
+    """Fallback path must deduplicate across iterations.
+
+    When the offset-based path is unavailable the fallback re-fetches the
+    same page every time, relying on set membership to discover *new* IDs.
+    The result must contain each ID exactly once and must preserve the first
+    occurrence order (no duplicates even when the page overlaps heavily with
+    already-seen ids).
+    """
+    col = MagicMock()
+    # Every odd call (offset attempt) raises; every even call (fallback fetch)
+    # returns a page that partially overlaps with what we have already seen.
+    col.get.side_effect = [
+        Exception("offset not supported"),       # iter 1 – offset path fails
+        {"ids": ["id1", "id2", "id3"]},          # iter 1 – fallback: 3 new ids
+        Exception("offset not supported"),       # iter 2 – offset path fails
+        {"ids": ["id1", "id2", "id3", "id4"]},  # iter 2 – fallback: id1-3 dup, id4 new
+        Exception("offset not supported"),       # iter 3 – offset path fails
+        {"ids": ["id1", "id2", "id3", "id4"]},  # iter 3 – no new ids → break
+    ]
+    ids = repair._paginate_ids(col)
+
+    # No duplicates
+    assert len(ids) == len(set(ids)), "Result must not contain duplicate IDs"
+    # All unique ids are present
+    assert set(ids) == {"id1", "id2", "id3", "id4"}
+    # First occurrences are preserved in order
+    assert ids == ["id1", "id2", "id3", "id4"]
+
+
 # ── scan_palace ───────────────────────────────────────────────────────
 
 

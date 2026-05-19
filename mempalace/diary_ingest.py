@@ -18,10 +18,13 @@ Usage:
 
 import hashlib
 import json
+import logging
 import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 from .miner import _extract_entities_for_metadata
 from .palace import (
@@ -101,7 +104,8 @@ def ingest_diaries(
     else:
         try:
             state = json.loads(state_file.read_text())
-        except Exception:
+        except Exception as exc:
+            logger.warning("diary_ingest: failed to load state file %s: %s", state_file, exc)
             state = {}
 
     drawers_col = get_collection(palace_path)

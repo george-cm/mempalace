@@ -18,6 +18,7 @@ import pytest
 from mempalace.palace import (
     MineAlreadyRunning,
     mine_global_lock,
+    mine_lock,
     mine_palace_lock,
 )
 
@@ -310,3 +311,66 @@ def test_mine_global_lock_is_alias_for_back_compat(tmp_path, monkeypatch):
     assert mine_global_lock is mine_palace_lock
     with mine_global_lock(str(tmp_path / "palace")):
         pass  # the alias accepts the same palace_path argument
+
+
+# ---------------------------------------------------------------------------
+# WARN-006 — lock file encoding
+# ---------------------------------------------------------------------------
+
+
+def test_mine_lock_with_non_ascii_source_path(tmp_path, monkeypatch):
+    """mine_lock succeeds when the source-file path contains non-ASCII chars.
+
+    The lock-file path is derived via sha256 of the source path's bytes so
+    Unicode paths don't affect the on-disk lock filename.  However, the
+    underlying ``open(lock_path, 'w')`` call must not raise on a narrow-locale
+    system — the ``encoding='utf-8'`` annotation (WARN-006) anchors the text
+    stream so the OS file-lock dance works regardless of the process locale.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+
+    non_ascii_path = str(tmp_path / "café_привет_日本語.txt")
+    with mine_lock(non_ascii_path):
+        pass  # must not raise UnicodeEncodeError or any other exception
+
+
+def test_mine_palace_lock_roundtrips_non_ascii_holder_identity(tmp_path, monkeypatch):
+    """Lock file correctly writes and reads back non-ASCII holder identity.
+
+    ``_write_lock_holder`` encodes the holder identity (PID + sys.argv) into
+    the lock file via the open file object.  Without ``encoding='utf-8'`` on
+    ``open(lock_path, 'r+')``, a sys.argv entry that contains non-ASCII
+    characters (e.g. a project path with accented letters or Cyrillic/CJK)
+    can raise ``UnicodeEncodeError`` on narrow-locale Windows builds.
+
+    The fix anchors the lock-file text stream to UTF-8 so the identity
+    round-trips correctly on every platform (WARN-006).
+    """
+    import sys as _sys
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+
+    non_ascii = "café_привет_日本語"
+    monkeypatch.setattr(_sys, "argv", ["mempalace", "mine", non_ascii])
+
+    palace = str(tmp_path / "unicode_palace")
+    # Acquire and release — _write_lock_holder runs inside the context.
+    with mine_palace_lock(palace):
+        pass
+
+    # The lock file must exist and its identity section must be valid UTF-8
+    # containing the non-ASCII argument.
+    lock_dir = tmp_path / ".mempalace" / "locks"
+    lock_files = list(lock_dir.glob("mine_palace_*.lock"))
+    assert lock_files, "lock file should exist after acquire/release"
+
+    raw = lock_files[0].read_bytes()
+    # Byte 0 is the OS lock sentinel; identity starts at byte 1.
+    identity_bytes = raw[1:]
+    identity_str = identity_bytes.decode("utf-8").strip()
+    assert non_ascii in identity_str, (
+        f"Non-ASCII identity must be UTF-8-encoded in the lock file; "
+        f"got: {identity_str!r}"
+    )
