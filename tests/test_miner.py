@@ -67,6 +67,19 @@ def test_load_config_uses_defaults_when_yaml_missing():
         shutil.rmtree(tmpdir)
 
 
+def test_load_config_reads_yaml_with_non_ascii_content(tmp_path):
+    """WARN-003: load_config must read mempalace.yaml as UTF-8.
+
+    On Windows, open() without encoding= defaults to cp1252, corrupting
+    room names/descriptions containing Romanian diacritics or other UTF-8 chars.
+    """
+    yaml_content = "wing: proiect\nrooms:\n- name: ș\n  description: Fișiere pentru Ă\n  keywords: [ș, â]\n"
+    (tmp_path / "mempalace.yaml").write_text(yaml_content, encoding="utf-8")
+    config = load_config(str(tmp_path))
+    assert config["rooms"][0]["name"] == "ș", "Non-ASCII room name must survive round-trip"
+    assert "Ă" in config["rooms"][0]["description"]
+
+
 def test_load_config_no_yaml_normalizes_hyphenated_wing():
     """Fallback wing name is normalized so it matches topics_by_wing keys.
 

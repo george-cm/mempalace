@@ -405,7 +405,7 @@ def refine_entities(
 
     for idx, batch in enumerate(batches, 1):
         if show_progress and batch:
-            _print_progress(idx - 1, len(batches), batch[0][0])
+            _print_progress(idx, len(batches), batch[0][0])
         user_prompt = _build_user_prompt(batch)
         try:
             resp = provider.classify(system_prompt, user_prompt, json_mode=True)

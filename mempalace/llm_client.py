@@ -97,8 +97,9 @@ def _endpoint_is_local(url: Optional[str]) -> bool:
                     return True
             except ValueError:
                 pass
-    # IPv6 unique-local addresses fc00::/7 — match leading hex chars
-    if host.startswith("fc") or host.startswith("fd"):
+    # IPv6 unique-local addresses fc00::/7 — match leading hex chars.
+    # Guard with ":" to avoid matching public FQDNs like "fchart.com".
+    if ":" in host and (host.startswith("fc") or host.startswith("fd")):
         return True
     return False
 
