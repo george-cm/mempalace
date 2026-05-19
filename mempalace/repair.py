@@ -102,6 +102,7 @@ def _get_palace_path():
 def _paginate_ids(col, where=None):
     """Pull all IDs in a collection using pagination."""
     ids = []
+    seen = set()
     page = 1000
     offset = 0
     while True:
@@ -110,10 +111,11 @@ def _paginate_ids(col, where=None):
         except Exception:
             try:
                 r = col.get(where=where, include=[], limit=page)
-                new_ids = [i for i in r["ids"] if i not in set(ids)]
+                new_ids = [i for i in r["ids"] if i not in seen]
                 if not new_ids:
                     break
                 ids.extend(new_ids)
+                seen.update(new_ids)
                 offset += len(new_ids)
                 continue
             except Exception:

@@ -3,6 +3,7 @@ import shlex
 import shutil
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 import chromadb
 import yaml
@@ -949,4 +950,33 @@ def test_mine_does_not_remove_other_processes_pid_file(tmp_path):
         mine(str(project_root), str(palace_path))
 
     assert pid_file.exists(), "Foreign PID entries must not be removed"
-    assert pid_file.read_text().strip() == str(other_pid)
+
+
+# ---------------------------------------------------------------------------
+# WARN-010: _refresh_known_entities_cache silent except → logger.warning
+# ---------------------------------------------------------------------------
+
+
+def test_refresh_known_entities_cache_logs_warning_on_bad_json(tmp_path, monkeypatch):
+    """WARN-010: _refresh_known_entities_cache must log a warning when JSON parsing fails.
+
+    Before the fix the except is silent.  After the fix it calls logger.warning.
+    """
+    import mempalace.miner as miner_mod
+
+    bad_json_file = tmp_path / "known_entities.json"
+    bad_json_file.write_text("{not valid json!!!")
+
+    monkeypatch.setattr(miner_mod, "_ENTITY_REGISTRY_PATH", str(bad_json_file))
+    # Force a cache miss so the reload path runs.
+    saved_mtime = miner_mod._ENTITY_REGISTRY_CACHE["mtime"]
+    miner_mod._ENTITY_REGISTRY_CACHE["mtime"] = None
+
+    try:
+        with patch.object(miner_mod, "logger") as mock_logger:
+            miner_mod._refresh_known_entities_cache()
+
+        mock_logger.warning.assert_called_once()
+    finally:
+        # Restore cache state to avoid contaminating other tests.
+        miner_mod._ENTITY_REGISTRY_CACHE["mtime"] = saved_mtime

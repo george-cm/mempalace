@@ -499,7 +499,12 @@ def _refresh_known_entities_cache() -> None:
                     names.update(str(n) for n in cat if n)
                 elif isinstance(cat, dict):
                     names.update(str(k) for k in cat.keys() if k)
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "Failed to load known_entities registry from %s: %s",
+            _ENTITY_REGISTRY_PATH,
+            exc,
+        )
         names = set()
         raw = {}
 
