@@ -258,6 +258,23 @@ def _warn_ambiguous(people: list) -> list:
     return ambiguous
 
 
+def _build_entity_codes(names: list) -> dict:
+    """Build collision-free AAAK codes for a list of names.
+
+    Starts with the first 3 uppercase letters. On collision, appends a numeric
+    suffix (1, 2, ...) to guarantee termination regardless of prefix overlap.
+    """
+    codes: dict = {}
+    for name in names:
+        code = name[:3].upper()
+        suffix = 1
+        while code in codes.values():
+            code = name[:3].upper() + str(suffix)
+            suffix += 1
+        codes[name] = code
+    return codes
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Main onboarding flow
 # ─────────────────────────────────────────────────────────────────────────────
@@ -274,14 +291,7 @@ def _generate_aaak_bootstrap(
     mempalace_dir.mkdir(parents=True, exist_ok=True)
 
     # Build AAAK entity codes (first 3 letters of name, uppercase)
-    entity_codes = {}
-    for p in people:
-        name = p["name"]
-        code = name[:3].upper()
-        # Handle collisions
-        while code in entity_codes.values():
-            code = name[:4].upper()
-        entity_codes[name] = code
+    entity_codes = _build_entity_codes([p["name"] for p in people])
 
     # AAAK entity registry
     registry_lines = [

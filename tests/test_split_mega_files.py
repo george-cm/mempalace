@@ -290,3 +290,32 @@ def test_split_file_tiny_fragments_skipped(tmp_path):
     # The first chunk is very small, should be skipped
     for p in written:
         assert p.stat().st_size > 0
+
+
+# --- WARN-002: split_mega_files.py must use explicit UTF-8 encoding ---
+
+
+def test_split_file_handles_non_ascii_content(tmp_path):
+    """WARN-002: read_text() without encoding= uses system locale (CP1252 on Windows).
+
+    Files with non-ASCII characters (Romanian diacritics, CJK, emoji, etc.)
+    must be read as UTF-8, not the system default.
+    """
+    # Non-ASCII content: Romanian diacritics + emoji
+    non_ascii = "Claude Code v1.0\n"
+    non_ascii += ("Ă ș ț â î — content with diacritics 🧠\n" * 30)
+    non_ascii += "Claude Code v1.0\n"
+    non_ascii += ("More content după split point — emoji: 🎯\n" * 30)
+
+    path = tmp_path / "non_ascii_mega.txt"
+    # Write explicitly as UTF-8
+    path.write_text(non_ascii, encoding="utf-8")
+
+    # Must not raise UnicodeDecodeError
+    written = smf.split_file(str(path), str(tmp_path))
+    assert isinstance(written, list)
+    # Output files must also preserve non-ASCII characters
+    for p in written:
+        content = p.read_text(encoding="utf-8")
+        # Non-ASCII chars must survive round-trip
+        assert "Ă" in content or "🧠" in content or "🎯" in content or "—" in content
