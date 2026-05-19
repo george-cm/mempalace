@@ -2,6 +2,57 @@
 
 ---
 
+## WARN-006 — `palace.py` lock file I/O missing `encoding="utf-8"`
+
+**Severity:** Medium  **Reported:** 2026-05-19  **Resolved:** 2026-05-19 - commit `d0b76b6`
+**Affects:** `palace.py` lines 297, 473 - lock holder identity on Windows
+
+Lock file written/read without encoding. Argv may contain non-ASCII paths; cp1252 default corrupts content.
+
+**Fix:** `open(lock_path, "w", encoding="utf-8")` and `open(lock_path, "r+", encoding="utf-8")`
+
+---
+
+## WARN-007 — `cli.py` and `layers.py` file reads missing `encoding="utf-8"`
+
+**Severity:** Low  **Reported:** 2026-05-19  **Resolved:** 2026-05-19 - commit `d0b76b6`
+**Affects:** `cli.py:215` `.gitignore` read, `layers.py:58` `identity.txt` read
+
+**Fix:** Add `encoding="utf-8", errors="replace"` to both call sites.
+
+---
+
+## WARN-008 — `repair.py` O(n²) deduplication in pagination fallback
+
+**Severity:** Medium  **Reported:** 2026-05-19  **Resolved:** 2026-05-19 - commit `d0b76b6`
+**Affects:** `repair.py:113` - large palaces (>10k drawers) see severe slowdown
+
+`set(ids)` reconstructed from the full list on every iteration. Fix: build the set once, extend incrementally.
+
+---
+
+## WARN-009 — `hooks_cli.py` PID file written empty before subprocess starts
+
+**Severity:** Medium  **Reported:** 2026-05-19  **Resolved:** 2026-05-19 - commit `d0b76b6`
+**Affects:** `hooks_cli.py:362` - duplicate mine processes can spawn concurrently
+
+File created empty, Popen spawned, PID written. Gap allows concurrent hook to read empty file and start a second mine.
+
+**Fix:** Write sentinel value immediately on creation; treat non-numeric content as "running".
+
+---
+
+## WARN-010 — Silent `except Exception` swallowing 4 failure paths
+
+**Severity:** Low  **Reported:** 2026-05-19  **Resolved:** 2026-05-19 - commit `d0b76b6`
+**Affects:** `miner.py:502`, `hooks_cli.py:608,743`, `diary_ingest.py:104`
+
+Errors silently swallowed with no log entry. Users see degraded behavior (empty entity detection, skipped hooks, duplicate drawers) with no diagnostic message.
+
+**Fix:** Add `logger.warning("...: %s", exc)` before each fallback.
+
+---
+
 ## BUG-007 — `llm_client.py` IPv6 locality check matches any `fc`/`fd` hostname
 
 **Severity:** High
