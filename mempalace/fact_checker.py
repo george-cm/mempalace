@@ -30,7 +30,7 @@ from __future__ import annotations
 import logging
 import os
 import re
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 # Share miner's mtime-cached registry loader so we don't double-read
 # ~/.mempalace/known_entities.json on every check_text call.
@@ -251,7 +251,7 @@ def _check_kg_contradictions(text: str, palace_path: str) -> list:
 
         # Stale fact: exact match on (subject, predicate, object) but KG
         # closed the window in the past.
-        now_iso = datetime.now(timezone.utc).date().isoformat()
+        now_date = datetime.now(timezone.utc).date()
         for fact in facts:
             if fact.get("current"):
                 continue
@@ -261,7 +261,7 @@ def _check_kg_contradictions(text: str, palace_path: str) -> list:
             if not _objects_match(fact.get("object"), claim_obj):
                 continue
             valid_to = fact.get("valid_to")
-            if valid_to and str(valid_to) < now_iso:
+            if _stale_before(valid_to, now_date):
                 issues.append(
                     {
                         "type": "stale_fact",
@@ -275,6 +275,23 @@ def _check_kg_contradictions(text: str, palace_path: str) -> list:
                 )
 
     return issues
+
+
+def _stale_before(valid_to, now_date: date) -> bool:
+    """Return True if valid_to is strictly before now_date.
+
+    Uses date-based comparison rather than raw string comparison so that
+    ISO 8601 datetime strings (YYYY-MM-DDTHH:MM:SSZ) are handled correctly.
+    A plain string comparison would give wrong results when valid_to contains
+    a time component and the date portion equals now_date.
+    """
+    if not valid_to:
+        return False
+    try:
+        vdate = date.fromisoformat(str(valid_to)[:10])
+        return vdate < now_date
+    except ValueError:
+        return False
 
 
 def _objects_match(kg_obj, claim_obj: str) -> bool:

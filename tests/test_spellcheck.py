@@ -158,3 +158,25 @@ def test_spellcheck_transcript_processes_content():
         assert lines[0] == "Assistant line"
         assert "fixed" in lines[1]
         assert lines[2] == "Another assistant line"
+
+
+# --- BUG-002: _load_known_names reads wrong registry key ---
+
+
+class TestLoadKnownNames:
+    def test_load_known_names_returns_registered_people(self, tmp_path):
+        """BUG-002: _load_known_names must read 'people' key not 'entities'."""
+        from mempalace.spellcheck import _load_known_names
+        from mempalace.entity_registry import EntityRegistry
+
+        # Build a registry with a known person and alias
+        reg = EntityRegistry(
+            {"people": {"Alice": {"canonical": "Alice", "aliases": ["Alicia"], "type": "person"}}},
+            tmp_path / "registry.json",
+        )
+
+        with patch("mempalace.entity_registry.EntityRegistry.load", return_value=reg):
+            names = _load_known_names()
+
+        assert "alice" in names, "canonical name must be in known names"
+        assert "alicia" in names, "alias must be in known names"

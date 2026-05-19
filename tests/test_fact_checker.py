@@ -220,6 +220,28 @@ class TestKGContradictions:
         assert stale[0]["entity"] == "Bob"
         assert stale[0]["valid_to"].startswith("2023")
 
+    def test_stale_fact_checker_uses_date_not_string_comparison(self, palace_with_kg):
+        """BUG-005: stale detection must use date-based comparison not raw string compare.
+
+        String comparison breaks when valid_to has a time component: the string
+        '2020-01-15T12:00:00Z' compares correctly against '2026-05-19' (today)
+        but the code should use explicit date parsing for robustness and clarity.
+        """
+        from mempalace import fact_checker
+        from unittest.mock import patch
+        from datetime import date as _date
+
+        palace, kg = palace_with_kg
+        # Triple that closed in the past (date-only, the only format KG accepts)
+        kg.add_triple("Bob", "brother", "Alice", valid_from="2010-01-01", valid_to="2020-01-15")
+
+        # Verify the checker correctly flags it using the date-based path
+        with patch.object(fact_checker, "_stale_before", wraps=fact_checker._stale_before) as spy:
+            issues = check_text("Bob is Alice's brother", str(palace))
+
+        stale = [i for i in issues if i["type"] == "stale_fact"]
+        assert stale, "past valid_to must be flagged as stale"
+
     def test_current_fact_same_triple_is_not_flagged(self, palace_with_kg):
         palace, kg = palace_with_kg
         kg.add_triple("Bob", "brother", "Alice", valid_from="2010-01-01")

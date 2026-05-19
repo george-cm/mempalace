@@ -191,8 +191,25 @@ def test_generate_aaak_bootstrap_collision(tmp_path):
     ]
     _generate_aaak_bootstrap(people, [], ["work"], "work", config_dir=tmp_path)
     content = (tmp_path / "aaak_entities.md").read_text(encoding="utf-8")
-    assert "ALI" in content
-    assert "ALIS" in content
+    assert "ALI=Alice" in content
+    assert "ALI1=Alison" in content
+
+
+def test_generate_aaak_bootstrap_4char_collision_produces_unique_codes(tmp_path):
+    """BUG-003: names colliding at 4 chars must each get a unique code.
+
+    Sequence:
+      Alice  -> ALI  (unique)
+      Alison -> ALI collision -> ALIS (unique)
+      Alicia -> ALI collision -> ALIC (unique)
+      Alick  -> ALI collision -> ALIC collision -> must produce a 3rd unique code
+    """
+    from mempalace.onboarding import _build_entity_codes
+
+    names = ["Alice", "Alison", "Alicia", "Alick"]
+    codes = _build_entity_codes(names)
+    values = list(codes.values())
+    assert len(set(values)) == len(values), f"Duplicate codes found: {codes}"
 
 
 def test_generate_aaak_bootstrap_no_relationship(tmp_path):

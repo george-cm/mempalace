@@ -548,7 +548,7 @@ def file_already_mined(collection, source_file: str, check_mtime: bool = False) 
         results = collection.get(where={"source_file": source_file}, limit=1)
         if not results.get("ids"):
             return False
-        stored_meta = results.get("metadatas", [{}])[0] or {}
+        stored_meta = (results.get("metadatas") or [{}])[0] or {}
         # Pre-v2 drawers have no version field — treat them as stale.
         stored_version = stored_meta.get("normalize_version", 1)
         if stored_version < NORMALIZE_VERSION:

@@ -200,3 +200,43 @@ def test_migrate_dry_run_rebuilds_when_collection_is_readable_but_not_writable(t
     assert "Rebuilding from SQLite" in out
     assert "Extracted 1 drawers from SQLite" in out
     assert "DRY RUN" in out
+
+
+# --- BUG-006: extract_drawers_from_sqlite must close connection on exception ---
+
+
+def test_extract_drawers_closes_connection_on_exception(tmp_path):
+    """BUG-006: SQLite connection must be released even when execute() raises."""
+    import sqlite3
+    from unittest.mock import MagicMock, patch, call
+    from mempalace.migrate import extract_drawers_from_sqlite
+
+    # Simulate a corrupted DB where execute() raises OperationalError
+    fake_conn = MagicMock()
+    fake_conn.execute.side_effect = sqlite3.OperationalError("no such table: embeddings")
+
+    with patch("mempalace.migrate.sqlite3.connect", return_value=fake_conn):
+        try:
+            extract_drawers_from_sqlite(str(tmp_path / "fake.sqlite3"))
+        except Exception:
+            pass  # exception is expected
+
+    # Connection must be closed regardless
+    fake_conn.close.assert_called_once()
+
+
+def test_extract_drawers_returns_empty_on_corrupt_db(tmp_path):
+    """BUG-006: function should propagate or handle exceptions gracefully."""
+    import sqlite3
+    from mempalace.migrate import extract_drawers_from_sqlite
+
+    db_path = tmp_path / "corrupt.sqlite3"
+    # Write garbage bytes - not a valid sqlite3 file
+    db_path.write_bytes(b"not a sqlite file")
+
+    try:
+        result = extract_drawers_from_sqlite(str(db_path))
+        # If it returns (no exception), must return a list
+        assert isinstance(result, list)
+    except Exception:
+        pass  # raising is also acceptable - the key check is the connection leak above

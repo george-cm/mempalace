@@ -169,3 +169,30 @@ class TestDecode:
         assert decoded["header"]["file"] == "001"
         assert decoded["arc"] == "journey"
         assert len(decoded["zettels"]) == 1
+
+
+# --- BUG-004: --config without value raises SystemExit not IndexError ---
+
+
+class TestParseConfigFlag:
+    def test_config_with_value(self):
+        from mempalace.dialect import _parse_config_flag
+
+        path, remaining = _parse_config_flag(["--config", "/some/path.json", "--init"])
+        assert path == "/some/path.json"
+        assert remaining == ["--init"]
+
+    def test_no_config_flag(self):
+        from mempalace.dialect import _parse_config_flag
+
+        path, remaining = _parse_config_flag(["compress", "hello"])
+        assert path is None
+        assert remaining == ["compress", "hello"]
+
+    def test_config_missing_value_exits_cleanly(self):
+        """BUG-004: --config with no following value must SystemExit, not IndexError."""
+        import pytest
+        from mempalace.dialect import _parse_config_flag
+
+        with pytest.raises(SystemExit):
+            _parse_config_flag(["--config"])

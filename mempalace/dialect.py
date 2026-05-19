@@ -983,6 +983,24 @@ class Dialect:
         }
 
 
+def _parse_config_flag(args: list) -> tuple:
+    """Parse --config <path> from args list. Returns (config_path, remaining_args).
+
+    Raises SystemExit with a clear error if --config is given without a value.
+    """
+    import sys as _sys
+
+    if "--config" not in args:
+        return None, args
+    idx = args.index("--config")
+    if idx + 1 >= len(args):
+        print("Error: --config requires a path argument", file=_sys.stderr)
+        _sys.exit(1)
+    config_path = args[idx + 1]
+    remaining = args[:idx] + args[idx + 2:]
+    return config_path, remaining
+
+
 # === CLI ===
 if __name__ == "__main__":
     import sys
@@ -1006,12 +1024,7 @@ if __name__ == "__main__":
         usage()
 
     # Parse --config flag
-    config_path = None
-    args = sys.argv[1:]
-    if "--config" in args:
-        idx = args.index("--config")
-        config_path = args[idx + 1]
-        args = args[:idx] + args[idx + 2 :]
+    config_path, args = _parse_config_flag(sys.argv[1:])
 
     # Create dialect instance
     if config_path:
