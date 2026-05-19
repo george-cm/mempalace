@@ -2,6 +2,108 @@
 
 ---
 
+## BUG-002 — `spellcheck.py` reads wrong registry key, always returns empty set
+
+**Severity:** High
+**Reported:** 2026-05-19
+**Resolved:** 2026-05-19 - commit `05750af`
+**Affects:** `spellcheck.py` `_load_known_names()` - registered names never corrected
+
+`_load_known_names` reads `reg._data.get('entities', {})` but `EntityRegistry` stores
+people under `'people'`. Spellcheck has silently never seen any registered names.
+
+**Fix:** `reg._data.get("people", {})` + update field access to match `people` dict structure.
+
+---
+
+## BUG-003 — `onboarding.py` infinite loop on entity code collision
+
+**Severity:** High
+**Reported:** 2026-05-19
+**Resolved:** 2026-05-19 - commit `05750af`
+**Affects:** `onboarding.py` entity code generation
+
+Collision loop sets `code = name[:4].upper()` unconditionally. Two names sharing a
+4-char prefix (e.g. "Alice"/"Alicia" both yield "ALIC") cause an infinite loop.
+
+**Fix:** Use numeric suffix: `code = name[:3].upper() + str(suffix)` with incrementing `suffix`.
+
+---
+
+## BUG-004 — `dialect.py` crashes with `IndexError` when `--config` has no value
+
+**Severity:** Medium
+**Reported:** 2026-05-19
+**Resolved:** 2026-05-19 - commit `05750af`
+**Affects:** `dialect.py` CLI, `--config` flag
+
+`args[idx + 1]` accessed without bounds check. `dialect --config` (no path argument)
+raises `IndexError` with no useful error message.
+
+**Fix:** Check `idx + 1 < len(args)` before access; print clear error and exit if missing.
+
+---
+
+## BUG-005 — `fact_checker.py` datetime string comparison misses same-day expiries
+
+**Severity:** Medium
+**Reported:** 2026-05-19
+**Resolved:** 2026-05-19 - commit `05750af`
+**Affects:** `fact_checker.py` stale fact detection
+
+`str(valid_to) < now_iso` compares a datetime string (`2025-01-09T12:00:00Z`) against a
+date string (`2025-01-09`). Python string ordering: `'2025-01-09'` < `'2025-01-09T...'`,
+so the condition is False for any fact expiring today with a time component. Facts that
+expired today are not flagged as stale.
+
+**Fix:** `date.fromisoformat(str(valid_to)[:10]) < datetime.now(timezone.utc).date()`
+
+---
+
+## BUG-006 — `migrate.py` leaks SQLite connection on exception
+
+**Severity:** Medium
+**Reported:** 2026-05-19
+**Resolved:** 2026-05-19 - commit `05750af`
+**Affects:** `migrate.py` `_read_drawers_from_sqlite()`
+
+`conn = sqlite3.connect(db_path)` at line 56, closed at line 109 with no `try/finally`.
+Any exception in between leaks the connection. On Windows, a leaked SQLite connection
+holds a file lock that blocks subsequent palace access.
+
+**Fix:** Wrap body in `try/finally: conn.close()`.
+
+---
+
+## WARN-001 — `palace.py` IndexError on mismatched ChromaDB metadatas
+
+**Severity:** Low
+**Reported:** 2026-05-19
+**Resolved:** 2026-05-19 - commit `05750af`
+**Affects:** `palace.py` `get_drawer()`
+
+`results.get("metadatas", [{}])[0]` raises `IndexError` if ChromaDB returns empty
+`metadatas` with non-empty `ids`. Caught by outer `except Exception` so impact is
+limited to silent re-mining, but root cause is hidden.
+
+**Fix:** `(results.get("metadatas") or [{}])[0] or {}`
+
+---
+
+## WARN-002 — `split_mega_files.py` uses platform-default encoding
+
+**Severity:** Low
+**Reported:** 2026-05-19
+**Resolved:** 2026-05-19 - commit `05750af`
+**Affects:** `split_mega_files.py` lines 189, 278
+
+File reads use no `encoding=` argument; defaults to system locale (CP1252 on Windows).
+UTF-8 transcripts with non-ASCII characters silently corrupt on Windows.
+
+**Fix:** `path.read_text(encoding="utf-8", errors="replace")`
+
+---
+
 ## BUG-001 — `mcp_call_tool` serialises arguments as a string in long Devin sessions
 
 **Severity:** High
