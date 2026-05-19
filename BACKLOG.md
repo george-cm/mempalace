@@ -2,6 +2,60 @@
 
 ---
 
+## BUG-007 — `llm_client.py` IPv6 locality check matches any `fc`/`fd` hostname
+
+**Severity:** High
+**Reported:** 2026-05-19
+**Resolved:** 2026-05-19 - commit `69aa37f`
+**Affects:** `llm_client.py` `_is_local_endpoint()` - external API privacy gate
+
+`host.startswith("fc") or host.startswith("fd")` matches FQDNs like `fchart.com`, not just
+IPv6 unique-local addresses. The external-API warning is silently suppressed for public hosts.
+
+**Fix:** Add colon guard: `if ":" in host and (host.startswith("fc") or host.startswith("fd")):`
+
+---
+
+## WARN-003 — Missing `encoding="utf-8"` on 7 file I/O call sites
+
+**Severity:** Medium
+**Reported:** 2026-05-19
+**Resolved:** 2026-05-19 - commit `69aa37f`
+**Affects:** Windows users with non-ASCII content (names, paths, YAML values)
+
+File opens without explicit encoding default to system locale (CP1252 on Windows), causing
+silent corruption or `UnicodeDecodeError` on Romanian diacritics, CJK, emoji, etc.
+
+Sites: `miner.py:328`, `room_detector_local.py:295`, `config.py:265,291,422,438`, `hooks_cli.py:460`
+
+**Fix:** Add `encoding="utf-8"` to all call sites.
+
+---
+
+## WARN-004 — `convo_miner.py` sha256 uses system-locale encoding for path hashing
+
+**Severity:** Low
+**Reported:** 2026-05-19
+**Resolved:** 2026-05-19 - commit `69aa37f`
+**Affects:** Sentinel ID stability on non-ASCII file paths
+
+`source_file.encode()` uses platform default. Different hash on different systems for same path.
+
+**Fix:** `source_file.encode("utf-8")`
+
+---
+
+## WARN-005 — `llm_refine.py` progress bar shows previous batch number
+
+**Severity:** Low
+**Reported:** 2026-05-19
+**Resolved:** 2026-05-19 - commit `69aa37f`
+**Affects:** UX only - shows "batch 0/5" while processing batch 1
+
+**Fix:** `_print_progress(idx, len(batches), ...)` not `idx - 1`
+
+---
+
 ## BUG-002 — `spellcheck.py` reads wrong registry key, always returns empty set
 
 **Severity:** High
