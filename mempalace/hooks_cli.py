@@ -336,7 +336,7 @@ def _mine_already_running(cmd: list[str]) -> bool:
     """Return True if a previous mine for ``cmd``'s target is still alive."""
     pid_file = _pid_file_for_cmd(cmd)
     try:
-        recorded = pid_file.read_text().strip()
+        recorded = pid_file.read_text(encoding="utf-8").strip()
     except OSError:
         return False
     if not recorded.isdigit():
@@ -457,7 +457,7 @@ def _increment_stop_counter(session_id: str) -> int:
     count = 0
     if counter_file.is_file():
         try:
-            count = int(counter_file.read_text().strip())
+            count = int(counter_file.read_text(encoding="utf-8").strip())
         except (ValueError, OSError):
             count = 0
     count += 1
@@ -722,7 +722,7 @@ def hook_stop(data: dict, harness: str):
     last_save = 0
     if last_save_file.is_file():
         try:
-            last_save = int(last_save_file.read_text().strip())
+            last_save = int(last_save_file.read_text(encoding="utf-8").strip())
         except (ValueError, OSError):
             last_save = 0
 

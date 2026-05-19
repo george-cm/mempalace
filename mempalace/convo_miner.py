@@ -76,7 +76,7 @@ def _register_file(collection, source_file: str, wing: str, agent: str):
     re-read and re-processed on every mine run because nothing was written to
     ChromaDB on the first pass.
     """
-    sentinel_id = f"_reg_{hashlib.sha256(source_file.encode()).hexdigest()[:24]}"
+    sentinel_id = f"_reg_{hashlib.sha256(source_file.encode('utf-8')).hexdigest()[:24]}"
     collection.upsert(
         documents=[f"[registry] {source_file}"],
         ids=[sentinel_id],

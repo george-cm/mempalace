@@ -483,3 +483,38 @@ def test_ollama_api_key_source_is_none():
     p = OllamaProvider(model="gemma4:e4b")
     assert p.api_key is None
     assert p.api_key_source is None
+
+
+# --- BUG-007: _is_local_endpoint IPv6 check must not match public FQDNs ---
+
+
+class TestIsLocalEndpoint:
+    def _check(self, url):
+        from mempalace.llm_client import _endpoint_is_local
+        return _endpoint_is_local(url)
+
+    def test_localhost_is_local(self):
+        assert self._check("http://localhost:11434") is True
+
+    def test_127_is_local(self):
+        assert self._check("http://127.0.0.1:8080") is True
+
+    def test_ipv6_loopback_is_local(self):
+        assert self._check("http://[::1]:8080") is True
+
+    def test_ipv6_unique_local_fc_is_local(self):
+        assert self._check("http://[fc00::1]:8080") is True
+
+    def test_ipv6_unique_local_fd_is_local(self):
+        assert self._check("http://[fd12:3456::1]:8080") is True
+
+    def test_public_fqdn_starting_fc_is_not_local(self):
+        """BUG-007: 'fchart.com' starts with 'fc' but is a public host."""
+        assert self._check("https://fchart.com/api") is False
+
+    def test_public_fqdn_starting_fd_is_not_local(self):
+        """BUG-007: 'fdrive.io' starts with 'fd' but is a public host."""
+        assert self._check("https://fdrive.io/v1") is False
+
+    def test_api_openai_is_not_local(self):
+        assert self._check("https://api.openai.com/v1") is False
