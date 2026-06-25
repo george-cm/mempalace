@@ -69,16 +69,35 @@ temp name then rename) and prunes the host to `-NasKeep` archives. A NAS failure
 is non-fatal - the local backup still counts as success (exit code `3` flags
 "local OK, NAS failed").
 
-`register_backup_task.ps1` installs a daily Scheduled Task (S4U logon, so it
-runs without a stored password and can still use your SSH key).
+**Where on the NAS does it land?** At the path given by `-NasPath`, which
+defaults to `backups/mempalace` **relative to the SSH login's home directory**
+on that host (e.g. for the `enterprise` alias / user `george`, that is
+`~/backups/mempalace/` -> `/var/services/homes/george/backups/mempalace/` on a
+typical Synology). Pass an absolute `-NasPath` (e.g. `/volume1/backups/mempalace`)
+to put it elsewhere; the script creates the directory if missing.
+
+**What is "S4U logon"?** S4U ("Service for User") is a Windows Scheduled-Task
+logon type that lets the task run as you **without storing your password** and
+**whether or not you are logged on**. It grants a local-only token: the task can
+read your profile (so SSH key auth from `~/.ssh` still works) but cannot use your
+credentials to reach password-protected network shares. Key-based `scp`/`ssh` to
+the NAS is unaffected.
+
+**Will it run if my laptop is off at the scheduled time?** Yes. The task is
+registered with `-StartWhenAvailable`, so a run missed because the machine was
+asleep/off fires as soon as the machine is next on. The time itself is fully
+configurable via `-Time` (24h `HH:mm`); pick a time you are usually powered on,
+or rely on the catch-up behaviour. It also runs on battery.
 
 ```powershell
-# Local-only daily backup at 02:30:
-pwsh -ExecutionPolicy Bypass -File tools\register_backup_task.ps1 -OutDir D:\Backups\MemPalace
-
-# Local + NAS over the `enterprise` SSH alias:
+# Daily backup at a time you choose (e.g. 12:30); catches up if the machine
+# was off at that time:
 pwsh -ExecutionPolicy Bypass -File tools\register_backup_task.ps1 `
-    -OutDir D:\Backups\MemPalace -NasAlias enterprise -Time 03:15
+    -OutDir D:\Backups\MemPalace -Time 12:30
+
+# Local + NAS over the `enterprise` SSH alias, custom NAS path:
+pwsh -ExecutionPolicy Bypass -File tools\register_backup_task.ps1 `
+    -OutDir D:\Backups\MemPalace -NasAlias enterprise -NasPath /volume1/backups/mempalace -Time 03:15
 
 # Test the wrapper once, by hand:
 pwsh -ExecutionPolicy Bypass -File tools\mempal_backup.ps1 -OutDir D:\Backups\MemPalace
