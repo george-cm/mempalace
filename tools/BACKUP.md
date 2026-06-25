@@ -10,19 +10,31 @@ backup and (optionally) copy the archive off this machine.
 
 ## Run a backup manually (quick start)
 
-**Local only** - one command, pick any folder outside `~/.mempalace`:
+**Local only** - one command. The `mempalace` CLI is a normal executable, so it
+needs **no `pwsh` prefix** - run it in any shell (PowerShell, cmd, bash). Pick
+any folder outside `~/.mempalace`:
 
 ```powershell
 mempalace backup --out C:\Users\George.Murga\Backups\MemPalace --keep 14
 ```
 
-**Local + push to the NAS** - use the wrapper (handles scp + retention):
+**Local + push to the NAS** - use the `mempal_backup.ps1` wrapper (handles scp +
+retention). How you launch it depends on where you are:
 
 ```powershell
-pwsh -File tools\mempal_backup.ps1 `
-    -OutDir C:\Users\George.Murga\Backups\MemPalace `
+# A) Already at a PowerShell prompt (the usual case) - call it directly:
+.\tools\mempal_backup.ps1 -OutDir C:\Users\George.Murga\Backups\MemPalace `
     -NasAlias enterprise -NasPath backups/mempalace -Keep 14 -NasKeep 30
 ```
+
+```text
+# B) From cmd / bash / Task Scheduler, or if your execution policy blocks
+#    scripts - use the explicit, works-anywhere form:
+pwsh -ExecutionPolicy Bypass -File tools\mempal_backup.ps1 -OutDir C:\Users\George.Murga\Backups\MemPalace -NasAlias enterprise -NasPath backups/mempalace -Keep 14 -NasKeep 30
+```
+
+If form A is blocked by execution policy, either use form B, or allow scripts
+once for your user: `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`.
 
 Exit codes: `0` = local (+NAS) ok; `3` = local ok but NAS copy failed; `1` = local backup failed.
 Log: `%LOCALAPPDATA%\MemPalace\backup.log`.
