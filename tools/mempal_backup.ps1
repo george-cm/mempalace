@@ -105,7 +105,11 @@ try {
 
             # Upload to a temp name, then atomically rename, so a killed/cut
             # transfer never leaves a truncated archive under the real name.
-            & scp -o LogLevel=ERROR $archive.FullName "${NasAlias}:${tmp}"
+            # -O forces the legacy SCP protocol: many NAS/BusyBox sshd builds
+            # (e.g. Synology DSM) do not expose the SFTP subsystem that modern
+            # scp uses by default, which otherwise fails with
+            # "subsystem request failed on channel 0".
+            & scp -O -o LogLevel=ERROR $archive.FullName "${NasAlias}:${tmp}"
             if ($LASTEXITCODE -ne 0) { throw "NAS scp failed ($LASTEXITCODE)" }
 
             & ssh -o LogLevel=ERROR $NasAlias "mv -f '$tmp' '$NasPath/$name'"
