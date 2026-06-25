@@ -2,6 +2,35 @@
 
 ---
 
+## OPEN: TASK-001 — Sync fork to upstream v3.5.0 (and PR the backup feature upstream)
+
+**Type:** Task  **Status:** OPEN  **Reported:** 2026-06-25
+**Affects:** whole repo (george-cm fork)
+
+The fork is ~525 commits behind upstream `milla-jovovich/mempalace` (diverged at v3.3.5,
+merge-base `d0163a7`; upstream now at **v3.5.0** = `2c08bb2`; fork main = `812eefe`).
+Upstream has shipped pluggable vector backends (pgvector/qdrant/sqlite_exact + RFC 001
+embedder-identity), multilingual embeddings, IDE integrations (Cursor/Antigravity/Gemini/
+Continue/Pi), MCP HTTP transport, an opt-in write daemon, Docker, hallway/tunnel dynamics,
+and new MCP tools (`mempalace_checkpoint`, `mempalace_mine`, `delete_by_source`).
+
+**Risk:** this repo is the LIVE memory tooling (Devin MCP server + Stop/SessionEnd hooks +
+editable `mempalace` command all point here). v3.5.0's RFC 001 "embedder-identity / three-state
+enforcement" may require a **palace migration** before it will read the existing 33k-drawer palace.
+Do NOT blind-rebase/force-push; validate v3.5.0 against a restored COPY of the palace first.
+
+**Plan (full, step-by-step):**
+`C:\Users\George.Murga\.config\mempalace-sync\2026-06-25-upstream-sync-plan.md`
+Phase 0 (backup+snapshot) → A (keep/drop the 32 fork commits) → B (isolated worktree validation,
+incl. the palace-compat check) → C (decision gate) → D (cutover + rollback).
+
+**Keep on sync:** the backup/verify/restore feature (new files, clean adds) + chosen personal
+config. **Drop:** the MCP-arg / Windows-UTF-8 / KG-uuid4 / BUG-WARN fixes (upstream already covers them).
+
+**Follow-up:** upstream has NO backup command — the feature is a clean upstream PR candidate.
+
+---
+
 ## WARN-006 — `palace.py` lock file I/O missing `encoding="utf-8"`
 
 **Severity:** Medium  **Reported:** 2026-05-19  **Resolved:** 2026-05-19 - commit `d0b76b6`
