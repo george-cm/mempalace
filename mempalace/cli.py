@@ -737,6 +737,42 @@ def cmd_repair_status(args):
     repair_status(palace_path=palace_path)
 
 
+def cmd_backup(args):
+    """Create a SQLite-safe, full-fidelity backup archive of the palace."""
+    from .backup import BackupError, create_backup
+
+    config_dir = (
+        os.path.expanduser(args.config_dir)
+        if args.config_dir
+        else os.path.expanduser("~/.mempalace")
+    )
+    palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
+    dests = [os.path.expanduser(d) for d in (args.out or [])]
+    if not dests:
+        print("  ERROR: at least one --out <dir> is required.")
+        sys.exit(2)
+
+    print(f"  Backing up palace at {palace_path}")
+    try:
+        result = create_backup(
+            config_dir,
+            dests,
+            palace_path=palace_path,
+            keep=args.keep,
+        )
+    except BackupError as e:
+        print(f"  BACKUP FAILED: {e}")
+        sys.exit(1)
+
+    size_mb = result.size_bytes / 1e6
+    print(f"  Archive: {result.archive_name} ({size_mb:.1f} MB, {result.file_count} files)")
+    for path in result.dest_paths:
+        print(f"    -> {path}")
+    if result.pruned:
+        print(f"  Pruned {len(result.pruned)} old archive(s) per --keep {args.keep}.")
+    print("  Backup complete.")
+
+
 def cmd_repair(args):
     """Rebuild palace vector index from SQLite metadata."""
     import shutil
@@ -1503,6 +1539,35 @@ def main():
 
     sub.add_parser("status", help="Show what's been filed")
 
+    # backup — SQLite-safe full-fidelity archive of the whole palace
+    p_backup = sub.add_parser(
+        "backup",
+        help="Create a SQLite-safe backup archive of the palace (drawers + KG + config)",
+    )
+    p_backup.add_argument(
+        "--out",
+        action="append",
+        metavar="DIR",
+        help="Destination directory for the archive (repeatable for multiple copies)",
+    )
+    p_backup.add_argument(
+        "--keep",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Retain only the N newest archives per destination (prune older)",
+    )
+    p_backup.add_argument(
+        "--config-dir",
+        default=None,
+        help="MemPalace config dir to back up (default: ~/.mempalace)",
+    )
+    p_backup.add_argument(
+        "--palace",
+        default=None,
+        help="Override the palace data dir (default: configured palace_path)",
+    )
+
     args = parser.parse_args()
 
     if not args.command:
@@ -1540,6 +1605,7 @@ def main():
         "repair-status": cmd_repair_status,
         "migrate": cmd_migrate,
         "status": cmd_status,
+        "backup": cmd_backup,
     }
     dispatch[args.command](args)
 
