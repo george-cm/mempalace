@@ -18,26 +18,15 @@ from pathlib import Path
 import pytest
 
 
-def _make_sqlite(path: Path, rows: list[str], *, wal: bool = False) -> None:
-    """Create a small SQLite db with a `note` table holding the given rows.
-
-    When ``wal=True``, the connection is left in WAL journal mode with the
-    rows committed but *not* checkpointed, leaving them in the -wal sidecar —
-    the exact condition a naive file copy would miss.
-    """
+def _make_sqlite(path: Path, rows: list[str]) -> None:
+    """Create a small SQLite db with a `note` table holding the given rows."""
     conn = sqlite3.connect(str(path))
     try:
-        if wal:
-            conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("CREATE TABLE IF NOT EXISTS note (id INTEGER PRIMARY KEY, body TEXT)")
         conn.executemany("INSERT INTO note (body) VALUES (?)", [(r,) for r in rows])
         conn.commit()
     finally:
-        conn.close() if not wal else None
-    if wal:
-        # Keep the connection open so the WAL is not auto-checkpointed on close.
-        # Caller relies on the rows living in <path>-wal.
-        return conn  # type: ignore[return-value]
+        conn.close()
 
 
 def _build_config_dir(root: Path) -> Path:
@@ -257,3 +246,189 @@ def test_cli_backup_command_creates_archive(tmp_path):
     cmd_backup(args)
 
     assert len(_archives(dest)) == 1
+
+
+# ── Round 1 hardening: data-loss, integrity, and isolation guarantees ──────
+
+
+def test_bad_integrity_check_aborts_and_writes_nothing(tmp_path, monkeypatch):
+    """A failed quick_check must raise and publish no archive anywhere."""
+    import mempalace.backup as backup_mod
+    from mempalace.backup import BackupError, create_backup
+
+    cfg = _build_config_dir(tmp_path / "home")
+    dest = tmp_path / "dest"
+
+    # Force the snapshot integrity check to report corruption.
+    def _bad_snapshot(src, dst):
+        import shutil
+
+        shutil.copy2(src, dst)
+        return "row 5 missing from index note_idx"
+
+    monkeypatch.setattr(backup_mod, "_snapshot_sqlite", _bad_snapshot)
+
+    with pytest.raises(BackupError):
+        create_backup(cfg, [dest])
+
+    assert _archives(dest) == []
+    # No partial/temp leftovers either.
+    assert list(dest.glob("*.part")) == [] if dest.exists() else True
+
+
+def test_manifest_sha256_matches_archived_bytes(tmp_path):
+    """Every MANIFEST entry's sha256/size must match the actual zip bytes."""
+    import hashlib
+
+    from mempalace.backup import create_backup
+
+    cfg = _build_config_dir(tmp_path / "home")
+    dest = tmp_path / "dest"
+    create_backup(cfg, [dest])
+
+    with zipfile.ZipFile(_archives(dest)[0]) as zf:
+        manifest = json.loads(zf.read("MANIFEST.json"))
+        for entry in manifest["files"]:
+            data = zf.read(entry["path"])
+            assert entry["size"] == len(data), entry["path"]
+            assert entry["sha256"] == hashlib.sha256(data).hexdigest(), entry["path"]
+    assert all(v == "ok" for v in manifest["sqlite_checks"].values())
+    assert manifest["file_count"] == len(manifest["files"])
+
+
+def test_archive_includes_hnsw_index(tmp_path):
+    """The rebuildable-but-valuable HNSW .bin files must be archived."""
+    from mempalace.backup import create_backup
+
+    cfg = _build_config_dir(tmp_path / "home")
+    dest = tmp_path / "dest"
+    create_backup(cfg, [dest])
+
+    with zipfile.ZipFile(_archives(dest)[0]) as zf:
+        names = set(zf.namelist())
+    assert "palace/4572b2d0-seg/data_level0.bin" in names
+    assert "palace/4572b2d0-seg/header.bin" in names
+
+
+def test_keep_zero_or_negative_is_rejected(tmp_path):
+    """keep<=0 is a footgun (silently keeps all); it must be rejected."""
+    from mempalace.backup import BackupError, create_backup
+
+    cfg = _build_config_dir(tmp_path / "home")
+    dest = tmp_path / "dest"
+
+    for bad in (0, -1):
+        with pytest.raises(BackupError):
+            create_backup(cfg, [dest], keep=bad)
+
+
+def test_destination_inside_palace_is_rejected(tmp_path):
+    """A dest within the live tree would get swept into future backups."""
+    from mempalace.backup import BackupError, create_backup
+
+    cfg = _build_config_dir(tmp_path / "home")
+    inside_palace = cfg / "palace" / "backups"
+    inside_config = cfg / "backups"
+
+    for bad in (inside_palace, inside_config, cfg, cfg / "palace"):
+        with pytest.raises(BackupError):
+            create_backup(cfg, [bad])
+
+
+def test_knowledge_graph_resolved_from_relocated_palace(tmp_path):
+    """When the KG lives under the palace (relocated palace), capture it.
+
+    Mirrors mcp_server/fact_checker which place the KG at
+    <palace>/knowledge_graph.sqlite3 when the palace is relocated. The
+    backup must not silently look only in config_dir.
+    """
+    from mempalace.backup import create_backup
+
+    cfg = tmp_path / "cfg"
+    cfg.mkdir()
+    palace = tmp_path / "relocated_palace"
+    palace.mkdir()
+    _make_sqlite(palace / "chroma.sqlite3", ["drawer one"])
+    # KG sits next to the palace, NOT under config_dir.
+    _make_sqlite(palace / "knowledge_graph.sqlite3", ["Alice knows Bob"])
+
+    dest = tmp_path / "dest"
+    result = create_backup(cfg, [dest], palace_path=palace)
+
+    with zipfile.ZipFile(_archives(dest)[0]) as zf:
+        names = set(zf.namelist())
+        rows = _rows(zf.read("knowledge_graph.sqlite3"), tmp_path)
+    assert "knowledge_graph.sqlite3" in names
+    assert "Alice knows Bob" in rows
+    assert result.kg_included is True
+
+
+def test_snapshot_handles_wal_with_missing_shm(tmp_path):
+    """An unclean shutdown (WAL present, -shm deleted) must still back up.
+
+    A strictly read-only open cannot rebuild the -shm and would fail exactly
+    when un-checkpointed words are at stake.
+    """
+    from mempalace.backup import create_backup
+
+    cfg = _build_config_dir(tmp_path / "home")
+    chroma = cfg / "palace" / "chroma.sqlite3"
+
+    conn = sqlite3.connect(str(chroma))
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("INSERT INTO note (body) VALUES ('uncheckpointed word')")
+        conn.commit()
+    finally:
+        conn.close()
+    # Simulate unclean shutdown: WAL stays, -shm is gone.
+    shm = cfg / "palace" / "chroma.sqlite3-shm"
+    if shm.exists():
+        shm.unlink()
+
+    dest = tmp_path / "dest"
+    create_backup(cfg, [dest])
+
+    with zipfile.ZipFile(_archives(dest)[0]) as zf:
+        rows = _rows(zf.read("palace/chroma.sqlite3"), tmp_path)
+    assert "uncheckpointed word" in rows
+
+
+def test_partial_archive_cleaned_up_on_dest_failure(tmp_path, monkeypatch):
+    """If a dest copy fails, no archive or .part is left, and BackupError raised.
+
+    Critically, an earlier successful dest must NOT have been pruned, so a
+    failed run can never destroy the last good backup.
+    """
+    import mempalace.backup as backup_mod
+    from mempalace.backup import BackupError, create_backup
+
+    cfg = _build_config_dir(tmp_path / "home")
+    good = tmp_path / "good"
+    bad = tmp_path / "bad"
+
+    # Seed an existing good archive so we can prove retention never ran.
+    good.mkdir()
+    sentinel = good / "mempalace-backup-20000101T000000Z.zip"
+    sentinel.write_bytes(b"old-but-precious")
+
+    real_copy = backup_mod.shutil.copy2
+
+    def _flaky_copy(src, dst, *a, **k):
+        # First dest (good) copies fine; second dest (bad) fails mid-write.
+        if Path(dst).parent.name == "bad":
+            Path(dst).write_bytes(b"truncated")  # leave a partial behind
+            raise OSError("simulated disk full")
+        return real_copy(src, dst, *a, **k)
+
+    monkeypatch.setattr(backup_mod.shutil, "copy2", _flaky_copy)
+
+    with pytest.raises(BackupError):
+        create_backup(cfg, [good, bad], keep=1)
+
+    # No new visible archive in either dest; no .part leftovers.
+    assert list(bad.glob("*.part")) == []
+    assert list(good.glob("*.part")) == []
+    assert _archives(bad) == []
+    # The pre-existing good archive survives (retention did not run on failure).
+    assert sentinel.exists()

@@ -72,6 +72,7 @@ class BackupResult:
     file_count: int
     sqlite_checks: dict[str, str] = field(default_factory=dict)
     pruned: list[str] = field(default_factory=list)
+    kg_included: bool = False
 
 
 def _utc_stamp(now: Optional[datetime]) -> str:
@@ -85,19 +86,29 @@ def _snapshot_sqlite(src: Path, dst: Path) -> str:
     """Take a consistent snapshot of ``src`` into ``dst`` via the backup API.
 
     Returns the ``PRAGMA quick_check`` result on the snapshot ("ok" when the
-    copy is sound). Opening the source read-only guarantees the live database
-    is never written to.
+    copy is sound).
+
+    The source is opened with a normal (read/write) connection rather than
+    ``mode=ro``: a strictly read-only open cannot reconstruct the ``-shm``
+    shared-memory file of a WAL database after an unclean shutdown, which is
+    exactly the moment the un-checkpointed words matter most. ``PRAGMA
+    query_only`` is set immediately so the live database is still never
+    mutated, while SQLite is free to read/rebuild the WAL state it needs.
     """
-    src_conn = sqlite3.connect(f"file:{src}?mode=ro", uri=True)
     try:
-        dst_conn = sqlite3.connect(str(dst))
+        src_conn = sqlite3.connect(str(src))
         try:
-            src_conn.backup(dst_conn)
-            rows = dst_conn.execute("PRAGMA quick_check").fetchall()
+            src_conn.execute("PRAGMA query_only = ON")
+            dst_conn = sqlite3.connect(str(dst))
+            try:
+                src_conn.backup(dst_conn)
+                rows = dst_conn.execute("PRAGMA quick_check").fetchall()
+            finally:
+                dst_conn.close()
         finally:
-            dst_conn.close()
-    finally:
-        src_conn.close()
+            src_conn.close()
+    except sqlite3.Error as e:
+        raise BackupError(f"failed to snapshot {src}: {e}") from e
 
     messages = [str(r[0]) for r in rows if r]
     if messages == ["ok"]:
@@ -106,13 +117,23 @@ def _snapshot_sqlite(src: Path, dst: Path) -> str:
 
 
 def _iter_extra_files(palace: Path) -> Iterable[Path]:
-    """Yield non-SQLite files under ``palace`` (HNSW index, sentinels)."""
+    """Yield non-SQLite files under ``palace`` (HNSW index, sentinels).
+
+    Symlinks are skipped so a link planted inside the palace cannot drag
+    arbitrary off-palace files into the archive (privacy-by-architecture).
+    """
     for path in sorted(palace.rglob("*")):
+        if path.is_symlink():
+            continue
         if not path.is_file():
             continue
         if path.name == "chroma.sqlite3":
             continue
         if path.name.endswith(_EXCLUDED_SUFFIXES):
+            continue
+        # Never re-capture our own archives (e.g. a dest accidentally inside
+        # the palace) — that would balloon every subsequent backup.
+        if path.name.startswith(ARCHIVE_PREFIX) and path.name.endswith(ARCHIVE_SUFFIX):
             continue
         if any(part in _EXCLUDED_DIRS for part in path.relative_to(palace).parts):
             continue
@@ -127,6 +148,20 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+def _resolve_kg(config_dir: Path, palace: Path) -> "Path | None":
+    """Locate the knowledge graph DB, preferring the palace-relative path.
+
+    The KG lives at ``<palace>/knowledge_graph.sqlite3`` whenever the server
+    runs with a relocated ``--palace`` (see mcp_server/fact_checker), and at
+    ``<config_dir>/knowledge_graph.sqlite3`` for the default layout. Checking
+    the palace first avoids silently dropping the graph from the archive.
+    """
+    for candidate in (palace / "knowledge_graph.sqlite3", config_dir / "knowledge_graph.sqlite3"):
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def _stage(config_dir: Path, palace: Path, stage: Path) -> dict[str, str]:
     """Populate ``stage`` with a full, consistent copy of the palace.
 
@@ -139,8 +174,8 @@ def _stage(config_dir: Path, palace: Path, stage: Path) -> dict[str, str]:
         palace / "chroma.sqlite3", stage / "palace" / "chroma.sqlite3"
     )
 
-    kg = config_dir / "knowledge_graph.sqlite3"
-    if kg.exists():
+    kg = _resolve_kg(config_dir, palace)
+    if kg is not None:
         checks["knowledge_graph.sqlite3"] = _snapshot_sqlite(kg, stage / "knowledge_graph.sqlite3")
 
     # HNSW index + any sentinel files under palace/.
@@ -197,6 +232,15 @@ def _zip_stage(stage: Path, archive: Path) -> None:
                 zf.write(path, path.relative_to(stage).as_posix())
 
 
+def _is_within(child: Path, parent: Path) -> bool:
+    """True if ``child`` is ``parent`` or lives underneath it (normalised)."""
+    try:
+        child.resolve(strict=False).relative_to(parent.resolve(strict=False))
+        return True
+    except ValueError:
+        return False
+
+
 def _prune(dest: Path, keep: int) -> list[str]:
     """Delete all but the ``keep`` newest archives in ``dest``.
 
@@ -242,10 +286,23 @@ def create_backup(
     dests = [Path(d) for d in dest_dirs]
     if not dests:
         raise BackupError("at least one destination directory is required")
+    if keep is not None and keep < 1:
+        raise BackupError(f"keep must be >= 1 (got {keep}); omit it to disable pruning")
 
     chroma = palace / "chroma.sqlite3"
     if not chroma.exists():
         raise BackupError(f"no palace found: {chroma} does not exist")
+
+    # A destination inside the live tree would be swept into the next backup
+    # (recursive bloat) and is almost certainly a mistake. Refuse it.
+    for dest in dests:
+        if dest.is_symlink():
+            raise BackupError(f"destination is a symlink, refusing: {dest}")
+        if _is_within(dest, palace) or _is_within(dest, config_dir):
+            raise BackupError(
+                f"destination {dest} is inside the live palace/config dir; "
+                "choose a location outside it"
+            )
 
     stamp = _utc_stamp(now)
     archive_name = f"{ARCHIVE_PREFIX}{stamp}{ARCHIVE_SUFFIX}"
@@ -269,17 +326,42 @@ def create_backup(
         _zip_stage(stage, staged_archive)
         size = staged_archive.stat().st_size
 
+        # Phase A — copy to a hidden ``.part`` in every destination and verify.
+        # Nothing visible (and no pruning) happens until every copy succeeds,
+        # so a mid-run failure can never leave a corrupt archive under the
+        # canonical name nor delete an older good one.
+        staged: list[tuple[Path, Path, Path]] = []  # (dest, part, final)
+        try:
+            for dest in dests:
+                dest.mkdir(parents=True, exist_ok=True)
+                part = dest / (archive_name + ".part")
+                final = dest / archive_name
+                shutil.copy2(staged_archive, part)
+                if part.stat().st_size != size:
+                    raise BackupError(f"size mismatch after copy to {part}")
+                staged.append((dest, part, final))
+        except Exception as e:
+            # Remove every ``.part`` we created (or were mid-writing) so a
+            # failed run leaves no garbage and never disturbs existing backups.
+            for dest in dests:
+                (dest / (archive_name + ".part")).unlink(missing_ok=True)
+            if isinstance(e, BackupError):
+                raise
+            raise BackupError(f"failed to write backup to a destination: {e}") from e
+
+        # Phase B — atomically promote each ``.part`` to its final name.
         dest_paths: list[str] = []
-        pruned: list[str] = []
-        for dest in dests:
-            dest.mkdir(parents=True, exist_ok=True)
-            final = dest / archive_name
-            shutil.copy2(staged_archive, final)
-            if final.stat().st_size != size:
-                raise BackupError(f"size mismatch after copy to {final}")
+        for _dest, part, final in staged:
+            part.replace(final)
             dest_paths.append(str(final))
-            if keep is not None:
+
+        # Phase C — retention prune (only now that every dest has a good copy).
+        pruned: list[str] = []
+        if keep is not None:
+            for dest, _part, _final in staged:
                 pruned.extend(_prune(dest, keep))
+
+        kg_included = "knowledge_graph.sqlite3" in checks
 
     return BackupResult(
         archive_name=archive_name,
@@ -288,6 +370,7 @@ def create_backup(
         file_count=file_count,
         sqlite_checks=checks,
         pruned=pruned,
+        kg_included=kg_included,
     )
 
 

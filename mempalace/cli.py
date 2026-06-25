@@ -760,12 +760,14 @@ def cmd_backup(args):
             palace_path=palace_path,
             keep=args.keep,
         )
-    except BackupError as e:
+    except (BackupError, OSError) as e:
         print(f"  BACKUP FAILED: {e}")
         sys.exit(1)
 
     size_mb = result.size_bytes / 1e6
     print(f"  Archive: {result.archive_name} ({size_mb:.1f} MB, {result.file_count} files)")
+    if not result.kg_included:
+        print("  NOTE: no knowledge_graph.sqlite3 found — graph NOT included in this backup.")
     for path in result.dest_paths:
         print(f"    -> {path}")
     if result.pruned:
