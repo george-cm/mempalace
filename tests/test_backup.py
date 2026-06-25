@@ -12,6 +12,7 @@ A backup must:
 
 import json
 import sqlite3
+import sys
 import zipfile
 from pathlib import Path
 
@@ -432,3 +433,101 @@ def test_partial_archive_cleaned_up_on_dest_failure(tmp_path, monkeypatch):
     assert _archives(bad) == []
     # The pre-existing good archive survives (retention did not run on failure).
     assert sentinel.exists()
+
+
+# ── Round 2 hardening: promotion atomicity, no-mutation, path/KG resolution ──
+
+
+def test_promotion_failure_leaves_no_part_and_raises_backup_error(tmp_path, monkeypatch):
+    """If the atomic promote (rename) fails for a dest, clean up and raise.
+
+    A raw OSError must not escape, and no `.part` may be left behind in any
+    not-yet-promoted destination.
+    """
+    import pathlib
+
+    from mempalace.backup import BackupError, create_backup
+
+    cfg = _build_config_dir(tmp_path / "home")
+    d1 = tmp_path / "d1"
+    d2 = tmp_path / "d2"
+
+    real_replace = pathlib.Path.replace
+
+    def _flaky_replace(self, target):
+        if Path(target).parent.name == "d2":
+            raise OSError("rename blocked (file locked)")
+        return real_replace(self, target)
+
+    monkeypatch.setattr(pathlib.Path, "replace", _flaky_replace)
+
+    with pytest.raises(BackupError):
+        create_backup(cfg, [d1, d2], keep=1)
+
+    assert list(d1.glob("*.part")) == []
+    assert list(d2.glob("*.part")) == []
+
+
+def test_wal_live_files_are_not_mutated_by_snapshot(tmp_path):
+    """Snapshotting a WAL database must not touch the live db or its sidecars."""
+    import hashlib
+
+    from mempalace.backup import _snapshot_sqlite
+
+    src = tmp_path / "chroma.sqlite3"
+    holder = sqlite3.connect(str(src))
+    try:
+        holder.execute("PRAGMA journal_mode=WAL")
+        holder.execute("CREATE TABLE note (id INTEGER PRIMARY KEY, body TEXT)")
+        holder.execute("INSERT INTO note (body) VALUES ('live word')")
+        holder.commit()  # lands in -wal; holder kept open so it stays there
+
+        def fp(p: Path):
+            return hashlib.sha256(p.read_bytes()).hexdigest() if p.exists() else None
+
+        triplet = [src, tmp_path / "chroma.sqlite3-wal", tmp_path / "chroma.sqlite3-shm"]
+        before = [fp(p) for p in triplet]
+
+        dst = tmp_path / "snap.sqlite3"
+        assert _snapshot_sqlite(src, dst) == "ok"
+
+        after = [fp(p) for p in triplet]
+    finally:
+        holder.close()
+
+    assert before == after, "live database/sidecars were modified by the snapshot"
+    rows = _rows(dst.read_bytes(), tmp_path)
+    assert "live word" in rows
+
+
+def test_default_layout_prefers_config_dir_kg_over_stale_palace_kg(tmp_path):
+    """In the default layout (palace == config_dir/palace), the config_dir KG
+    is authoritative even if a stale palace-side KG file also exists."""
+    from mempalace.backup import create_backup
+
+    cfg = _build_config_dir(tmp_path / "home")
+    # _build_config_dir already wrote the live KG at cfg/knowledge_graph.sqlite3.
+    # Plant a STALE palace-side KG that must NOT be the one captured.
+    _make_sqlite(cfg / "palace" / "knowledge_graph.sqlite3", ["STALE do not use"])
+
+    dest = tmp_path / "dest"
+    create_backup(cfg, [dest])
+
+    with zipfile.ZipFile(_archives(dest)[0]) as zf:
+        rows = _rows(zf.read("knowledge_graph.sqlite3"), tmp_path)
+    assert "Alice parent_of Max" in rows
+    assert "STALE do not use" not in rows
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="case-insensitive FS guard")
+def test_dest_inside_palace_rejected_case_insensitively(tmp_path):
+    """On Windows a mixed-case dest inside the palace must still be rejected."""
+    from mempalace.backup import BackupError, create_backup
+
+    cfg = _build_config_dir(tmp_path / "home")
+    palace = cfg / "palace"
+    # Same location, deliberately mangled case in the palace portion.
+    mixed = Path(str(palace).upper()) / "backups"
+
+    with pytest.raises(BackupError):
+        create_backup(cfg, [mixed])

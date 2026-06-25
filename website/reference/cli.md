@@ -134,6 +134,34 @@ mempalace repair
 
 Creates a backup at `<palace_path>.backup` before rebuilding.
 
+## `mempalace backup`
+
+Create a SQLite-safe, full-fidelity backup archive of the whole palace — the
+verbatim drawers (`chroma.sqlite3`), the knowledge graph, the HNSW index, and
+config files — into one timestamped `.zip`. SQLite databases are snapshotted
+through the online backup API (folding in any uncommitted WAL), the live palace
+is only ever read, and the archive carries a `MANIFEST.json` with per-file
+SHA-256 and integrity-check results.
+
+```bash
+mempalace backup --out D:\Backups\MemPalace
+mempalace backup --out D:\Backups\MemPalace --out E:\offsite --keep 14
+mempalace backup --out D:\Backups\MemPalace --palace ~/.custom-palace
+```
+
+| Option | Description |
+|--------|-------------|
+| `--out DIR` | Destination directory (repeatable for multiple copies). Required. Must be outside the palace/config dir. |
+| `--keep N` | Retain only the N newest archives per destination (prune older). N must be ≥ 1. Omit to disable pruning. |
+| `--config-dir DIR` | MemPalace config dir to back up (default: `~/.mempalace`). |
+| `--palace DIR` | Override the palace data dir (default: configured `palace_path`). |
+
+**Restore:** unzip the archive, replace the palace/config files, delete any
+stale `-wal`/`-shm` sidecars, then run `mempalace repair` to regenerate the HNSW
+index from the restored `chroma.sqlite3` (the source of truth). See
+[`tools/BACKUP.md`](https://github.com/george-cm/mempalace/blob/main/tools/BACKUP.md)
+for the full procedure and the optional scheduled-backup tooling.
+
 ## `mempalace mcp`
 
 Helper command that outputs setup syntax (like `claude mcp add...`) to connect MemPalace to your AI client, automatically handling paths.

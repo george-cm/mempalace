@@ -80,6 +80,7 @@ mempalace/
 ├── entity_registry.py   # Entity storage and disambiguation
 ├── layers.py            # L0-L3 memory wake-up stack
 ├── onboarding.py        # Interactive first-run setup
+├── backup.py            # SQLite-safe full-fidelity palace backup archives
 ├── repair.py            # Palace repair and consistency checks
 ├── dedup.py             # Deduplication
 ├── migrate.py           # ChromaDB version migration

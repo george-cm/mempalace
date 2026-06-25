@@ -22,6 +22,7 @@ the incremental-only / never-destroy design principle.
 
 import hashlib
 import json
+import os
 import shutil
 import socket
 import sqlite3
@@ -88,25 +89,35 @@ def _snapshot_sqlite(src: Path, dst: Path) -> str:
     Returns the ``PRAGMA quick_check`` result on the snapshot ("ok" when the
     copy is sound).
 
-    The source is opened with a normal (read/write) connection rather than
-    ``mode=ro``: a strictly read-only open cannot reconstruct the ``-shm``
-    shared-memory file of a WAL database after an unclean shutdown, which is
-    exactly the moment the un-checkpointed words matter most. ``PRAGMA
-    query_only`` is set immediately so the live database is still never
-    mutated, while SQLite is free to read/rebuild the WAL state it needs.
+    To guarantee the *live* database is never mutated, we first filesystem-copy
+    the ``.sqlite3`` file together with its ``-wal``/``-shm`` sidecars into a
+    private temp dir, then run the online backup API against that COPY. Opening
+    the live file with a writable connection risks a close-time WAL checkpoint
+    (when the backup is the sole connection) that would rewrite the user's data;
+    copying the byte triplet sidesteps that entirely while still folding the WAL
+    into the snapshot — and it also lets SQLite rebuild a missing ``-shm`` on the
+    throwaway copy rather than the original.
     """
     try:
-        src_conn = sqlite3.connect(str(src))
-        try:
-            src_conn.execute("PRAGMA query_only = ON")
-            dst_conn = sqlite3.connect(str(dst))
+        with tempfile.TemporaryDirectory(prefix="mempalace_snap_") as snap_tmp:
+            tmp_src = Path(snap_tmp) / src.name
+            # Copy the db and any live sidecars (order doesn't matter; SQLite
+            # reconciles them when the copy is opened).
+            for suffix in ("", "-wal", "-shm"):
+                side = src.parent / (src.name + suffix)
+                if side.exists():
+                    shutil.copy2(side, Path(snap_tmp) / (src.name + suffix))
+
+            src_conn = sqlite3.connect(str(tmp_src))
             try:
-                src_conn.backup(dst_conn)
-                rows = dst_conn.execute("PRAGMA quick_check").fetchall()
+                dst_conn = sqlite3.connect(str(dst))
+                try:
+                    src_conn.backup(dst_conn)
+                    rows = dst_conn.execute("PRAGMA quick_check").fetchall()
+                finally:
+                    dst_conn.close()
             finally:
-                dst_conn.close()
-        finally:
-            src_conn.close()
+                src_conn.close()
     except sqlite3.Error as e:
         raise BackupError(f"failed to snapshot {src}: {e}") from e
 
@@ -153,10 +164,19 @@ def _resolve_kg(config_dir: Path, palace: Path) -> "Path | None":
 
     The KG lives at ``<palace>/knowledge_graph.sqlite3`` whenever the server
     runs with a relocated ``--palace`` (see mcp_server/fact_checker), and at
-    ``<config_dir>/knowledge_graph.sqlite3`` for the default layout. Checking
-    the palace first avoids silently dropping the graph from the archive.
+    ``<config_dir>/knowledge_graph.sqlite3`` for the default layout.
+
+    We mirror the runtime's relocation intent rather than picking purely on
+    existence: in the default layout the config-dir KG is authoritative even if
+    a stale palace-side file lingers; only a genuinely relocated palace makes
+    the palace-side KG primary.
     """
-    for candidate in (palace / "knowledge_graph.sqlite3", config_dir / "knowledge_graph.sqlite3"):
+    relocated = palace.resolve(strict=False) != (config_dir / "palace").resolve(strict=False)
+    if relocated:
+        order = (palace / "knowledge_graph.sqlite3", config_dir / "knowledge_graph.sqlite3")
+    else:
+        order = (config_dir / "knowledge_graph.sqlite3", palace / "knowledge_graph.sqlite3")
+    for candidate in order:
         if candidate.exists():
             return candidate
     return None
@@ -233,11 +253,18 @@ def _zip_stage(stage: Path, archive: Path) -> None:
 
 
 def _is_within(child: Path, parent: Path) -> bool:
-    """True if ``child`` is ``parent`` or lives underneath it (normalised)."""
+    """True if ``child`` is ``parent`` or lives underneath it.
+
+    Uses ``os.path.normcase`` + ``commonpath`` so the check is correct on
+    case-insensitive filesystems (Windows) even when the destination does not
+    yet exist on disk (so ``Path.resolve`` cannot canonicalise its case).
+    """
+    c = os.path.normcase(os.path.abspath(str(child)))
+    p = os.path.normcase(os.path.abspath(str(parent)))
     try:
-        child.resolve(strict=False).relative_to(parent.resolve(strict=False))
-        return True
+        return os.path.commonpath([c, p]) == p
     except ValueError:
+        # Different drives / UNC roots — cannot be contained.
         return False
 
 
@@ -349,11 +376,26 @@ def create_backup(
                 raise
             raise BackupError(f"failed to write backup to a destination: {e}") from e
 
-        # Phase B — atomically promote each ``.part`` to its final name.
+        # Phase B — atomically promote each ``.part`` to its final name. If a
+        # promotion fails, remove every not-yet-promoted ``.part`` and report
+        # via BackupError (a raw OSError must never escape, and no stray
+        # ``.part`` may be left behind). Already-promoted dests keep their good
+        # archive — partial promotion is acceptable but must be surfaced.
         dest_paths: list[str] = []
-        for _dest, part, final in staged:
-            part.replace(final)
-            dest_paths.append(str(final))
+        promoted: set[Path] = set()
+        try:
+            for _dest, part, final in staged:
+                part.replace(final)
+                promoted.add(final)
+                dest_paths.append(str(final))
+        except OSError as e:
+            for _dest, part, final in staged:
+                if final not in promoted:
+                    part.unlink(missing_ok=True)
+            raise BackupError(
+                f"failed to finalise backup (promoted {len(promoted)} of "
+                f"{len(staged)} destinations): {e}"
+            ) from e
 
         # Phase C — retention prune (only now that every dest has a good copy).
         pruned: list[str] = []
