@@ -8,6 +8,41 @@ The two PowerShell scripts in this folder are **optional, user-owned
 automation** - they are not part of MemPalace core. They exist to schedule the
 backup and (optionally) copy the archive off this machine.
 
+## Run a backup manually (quick start)
+
+**Local only** - one command, pick any folder outside `~/.mempalace`:
+
+```powershell
+mempalace backup --out C:\Users\George.Murga\Backups\MemPalace --keep 14
+```
+
+**Local + push to the NAS** - use the wrapper (handles scp + retention):
+
+```powershell
+pwsh -File tools\mempal_backup.ps1 `
+    -OutDir C:\Users\George.Murga\Backups\MemPalace `
+    -NasAlias enterprise -NasPath backups/mempalace -Keep 14 -NasKeep 30
+```
+
+Exit codes: `0` = local (+NAS) ok; `3` = local ok but NAS copy failed; `1` = local backup failed.
+Log: `%LOCALAPPDATA%\MemPalace\backup.log`.
+
+**Check / restore an archive:**
+
+```powershell
+mempalace backup-verify C:\...\mempalace-backup-YYYYMMDDTHHMMSSZ.zip
+mempalace restore       C:\...\mempalace-backup-YYYYMMDDTHHMMSSZ.zip --config-dir ~\.mempalace --force
+mempalace repair        # rebuild the HNSW index after a restore
+```
+
+**Confirm a NAS copy landed (optional):**
+
+```powershell
+ssh enterprise "ls -l backups/mempalace/"
+```
+
+Full details (what's in an archive, the manual restore procedure, scheduling) are below.
+
 ## Privacy - read before scheduling
 
 MemPalace stores your **verbatim** memory and is local-first by design: your
