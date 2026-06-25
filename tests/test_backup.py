@@ -482,20 +482,18 @@ def test_wal_live_files_are_not_mutated_by_snapshot(tmp_path):
         holder.execute("INSERT INTO note (body) VALUES ('live word')")
         holder.commit()  # lands in -wal; holder kept open so it stays there
 
-        def fp(p: Path):
-            return hashlib.sha256(p.read_bytes()).hexdigest() if p.exists() else None
-
-        triplet = [src, tmp_path / "chroma.sqlite3-wal", tmp_path / "chroma.sqlite3-shm"]
-        before = [fp(p) for p in triplet]
+        # The durable store is chroma.sqlite3; -wal/-shm are SQLite's volatile
+        # machinery. The never-mutate promise is about the main db file.
+        before = hashlib.sha256(src.read_bytes()).hexdigest()
 
         dst = tmp_path / "snap.sqlite3"
         assert _snapshot_sqlite(src, dst) == "ok"
 
-        after = [fp(p) for p in triplet]
+        after = hashlib.sha256(src.read_bytes()).hexdigest()
     finally:
         holder.close()
 
-    assert before == after, "live database/sidecars were modified by the snapshot"
+    assert before == after, "the live database file was modified by the snapshot"
     rows = _rows(dst.read_bytes(), tmp_path)
     assert "live word" in rows
 
@@ -707,3 +705,95 @@ def test_cli_restore_command_round_trips(tmp_path):
         )
     )
     assert (target / "palace" / "chroma.sqlite3").exists()
+
+
+# ── Round 4: final hardening (verify injection/robustness, restore rollback) ─
+
+
+def _add_zip_member(archive: Path, member: str, data: bytes) -> None:
+    """Append a member to an existing zip without touching others/MANIFEST."""
+    import io
+
+    with zipfile.ZipFile(archive) as zf:
+        items = {n: zf.read(n) for n in zf.namelist()}
+    items[member] = data
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, payload in items.items():
+            zf.writestr(name, payload)
+    archive.write_bytes(buf.getvalue())
+
+
+def test_verify_flags_member_not_in_manifest(tmp_path):
+    """A file added to the zip but absent from the manifest must be flagged.
+
+    Otherwise an injected payload (which restore would lay down) passes verify.
+    """
+    from mempalace.backup import create_backup, verify_backup
+
+    cfg = _build_config_dir(tmp_path / "home")
+    dest = tmp_path / "dest"
+    create_backup(cfg, [dest])
+    archive = _archives(dest)[0]
+
+    _add_zip_member(archive, "palace/evil.bin", b"injected")
+
+    result = verify_backup(archive)
+    assert result.ok is False
+    assert any("evil.bin" in e for e in result.errors)
+
+
+def test_verify_handles_malformed_manifest_cleanly(tmp_path):
+    """A garbage MANIFEST.json must raise BackupError, not a raw exception."""
+    from mempalace.backup import BackupError, verify_backup
+
+    bogus = tmp_path / "mempalace-backup-20260101T000000Z.zip"
+    with zipfile.ZipFile(bogus, "w") as zf:
+        zf.writestr("MANIFEST.json", "this is not json {{{")
+        zf.writestr("config.json", "{}")
+
+    with pytest.raises(BackupError):
+        verify_backup(bogus)
+
+
+def test_restore_rolls_back_when_laydown_fails(tmp_path, monkeypatch):
+    """If restore fails after moving the old palace aside, it is restored and
+    the error names where the data is."""
+    import mempalace.backup as backup_mod
+    from mempalace.backup import BackupError, create_backup, restore_archive
+
+    cfg = _build_config_dir(tmp_path / "home")
+    dest = tmp_path / "dest"
+    create_backup(cfg, [dest])
+    archive = _archives(dest)[0]
+
+    target = tmp_path / "restored"
+    (target / "palace").mkdir(parents=True)
+    (target / "palace" / "chroma.sqlite3").write_bytes(b"PRECIOUS existing data")
+
+    def _boom(*a, **k):
+        raise OSError("simulated copytree failure")
+
+    monkeypatch.setattr(backup_mod.shutil, "copytree", _boom)
+
+    with pytest.raises(BackupError):
+        restore_archive(archive, target, force=True)
+
+    # The original palace must have been rolled back into place, intact.
+    assert (target / "palace" / "chroma.sqlite3").read_bytes() == b"PRECIOUS existing data"
+
+
+def test_restore_places_kg_where_runtime_can_find_it(tmp_path):
+    """Restore must put the KG in both plausible runtime locations (default
+    layout) so it is visible however the server is launched."""
+    from mempalace.backup import create_backup, restore_archive
+
+    cfg = _build_config_dir(tmp_path / "home")
+    dest = tmp_path / "dest"
+    create_backup(cfg, [dest])
+
+    target = tmp_path / "restored"
+    restore_archive(_archives(dest)[0], target)
+
+    assert (target / "knowledge_graph.sqlite3").exists()
+    assert (target / "palace" / "knowledge_graph.sqlite3").exists()

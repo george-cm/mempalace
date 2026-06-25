@@ -89,35 +89,39 @@ def _snapshot_sqlite(src: Path, dst: Path) -> str:
     Returns the ``PRAGMA quick_check`` result on the snapshot ("ok" when the
     copy is sound).
 
-    To guarantee the *live* database is never mutated, we first filesystem-copy
-    the ``.sqlite3`` file together with its ``-wal``/``-shm`` sidecars into a
-    private temp dir, then run the online backup API against that COPY. Opening
-    the live file with a writable connection risks a close-time WAL checkpoint
-    (when the backup is the sole connection) that would rewrite the user's data;
-    copying the byte triplet sidesteps that entirely while still folding the WAL
-    into the snapshot — and it also lets SQLite rebuild a missing ``-shm`` on the
-    throwaway copy rather than the original.
+    Primary path: open the live database **read-only** (``mode=ro``) and run the
+    online backup API. A read-only connection takes a single consistent read
+    transaction across the main file and its WAL, so the snapshot can neither
+    miss a committed row nor capture a torn db/WAL pair, and it never writes or
+    checkpoints the user's file.
+
+    Fallback path: a read-only open cannot reconstruct a missing/stale ``-shm``
+    after an unclean shutdown. In that rare case we filesystem-copy the
+    ``.sqlite3`` + ``-wal`` + ``-shm`` triplet into a temp dir and back up from
+    the copy, so the user still gets a (best-effort) snapshot rather than a hard
+    failure. The live files are only ever read in either path.
     """
     try:
-        with tempfile.TemporaryDirectory(prefix="mempalace_snap_") as snap_tmp:
-            tmp_src = Path(snap_tmp) / src.name
-            # Copy the db and any live sidecars (order doesn't matter; SQLite
-            # reconciles them when the copy is opened).
-            for suffix in ("", "-wal", "-shm"):
-                side = src.parent / (src.name + suffix)
-                if side.exists():
-                    shutil.copy2(side, Path(snap_tmp) / (src.name + suffix))
-
-            src_conn = sqlite3.connect(str(tmp_src))
+        try:
+            src_uri = src.resolve(strict=False).as_uri() + "?mode=ro"
+            src_conn = sqlite3.connect(src_uri, uri=True)
             try:
-                dst_conn = sqlite3.connect(str(dst))
-                try:
-                    src_conn.backup(dst_conn)
-                    rows = dst_conn.execute("PRAGMA quick_check").fetchall()
-                finally:
-                    dst_conn.close()
+                rows = _backup_via_connection(src_conn, dst)
             finally:
                 src_conn.close()
+        except sqlite3.OperationalError:
+            # Read-only open could not initialise WAL state (e.g. missing -shm
+            # after an unclean shutdown). Snapshot from a private copy instead.
+            with tempfile.TemporaryDirectory(prefix="mempalace_snap_") as snap_tmp:
+                for suffix in ("", "-wal", "-shm"):
+                    side = src.parent / (src.name + suffix)
+                    if side.exists():
+                        shutil.copy2(side, Path(snap_tmp) / (src.name + suffix))
+                copy_conn = sqlite3.connect(str(Path(snap_tmp) / src.name))
+                try:
+                    rows = _backup_via_connection(copy_conn, dst)
+                finally:
+                    copy_conn.close()
     except sqlite3.Error as e:
         raise BackupError(f"failed to snapshot {src}: {e}") from e
 
@@ -125,6 +129,16 @@ def _snapshot_sqlite(src: Path, dst: Path) -> str:
     if messages == ["ok"]:
         return "ok"
     return "; ".join(messages) or "unknown"
+
+
+def _backup_via_connection(src_conn: "sqlite3.Connection", dst: Path):
+    """Run the online backup API from ``src_conn`` into ``dst`` and quick_check."""
+    dst_conn = sqlite3.connect(str(dst))
+    try:
+        src_conn.backup(dst_conn)
+        return dst_conn.execute("PRAGMA quick_check").fetchall()
+    finally:
+        dst_conn.close()
 
 
 def _iter_extra_files(palace: Path) -> Iterable[Path]:
@@ -450,10 +464,21 @@ def verify_backup(archive_path) -> VerifyResult:
             names = set(zf.namelist())
             if "MANIFEST.json" not in names:
                 raise BackupError(f"{archive_path} has no MANIFEST.json — not a MemPalace backup")
-            manifest = json.loads(zf.read("MANIFEST.json"))
-            files = manifest.get("files", [])
+            try:
+                manifest = json.loads(zf.read("MANIFEST.json"))
+            except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                raise BackupError(f"{archive_path}: MANIFEST.json is not valid JSON: {e}") from e
+            if not isinstance(manifest, dict) or not isinstance(manifest.get("files"), list):
+                raise BackupError(f"{archive_path}: MANIFEST.json is malformed (missing 'files')")
+
+            files = manifest["files"]
+            manifest_paths = {"MANIFEST.json"}
             for entry in files:
-                rel = entry["path"]
+                rel = entry.get("path") if isinstance(entry, dict) else None
+                if rel is None:
+                    errors.append("manifest entry missing 'path'")
+                    continue
+                manifest_paths.add(rel)
                 if rel not in names:
                     errors.append(f"{rel}: listed in manifest but missing from archive")
                     continue
@@ -464,6 +489,12 @@ def verify_backup(archive_path) -> VerifyResult:
                     )
                 if hashlib.sha256(data).hexdigest() != entry.get("sha256"):
                     errors.append(f"{rel}: sha256 mismatch (content altered)")
+
+            # Any member not covered by the manifest is an injected file that
+            # restore would lay down — flag it so verification cannot be bypassed.
+            for extra in sorted(names - manifest_paths):
+                errors.append(f"{extra}: present in archive but not in manifest (injected file)")
+
             for db, res in manifest.get("sqlite_checks", {}).items():
                 if res != "ok":
                     errors.append(f"{db}: recorded integrity check was {res!r}, not 'ok'")
@@ -509,30 +540,51 @@ def restore_archive(archive_path, config_dir, *, palace_path=None, force=False) 
 
         config_dir.mkdir(parents=True, exist_ok=True)
 
-        # Move an existing palace aside (never destroy) before laying the new one.
+        # Move an existing palace aside (never destroy) before laying the new
+        # one. If anything below fails, roll the old palace back into place so
+        # the user is never left with no palace.
         moved_aside: "str | None" = None
+        aside: "Path | None" = None
         if palace_nonempty:
             stamp = _utc_stamp(None)
             aside = palace.with_name(palace.name + f".pre-restore-{stamp}")
             palace.replace(aside)
             moved_aside = str(aside)
 
-        shutil.copytree(tmp / "palace", palace, dirs_exist_ok=True)
+        try:
+            shutil.copytree(tmp / "palace", palace, dirs_exist_ok=True)
+        except Exception as e:
+            if aside is not None:
+                if palace.exists():
+                    shutil.rmtree(palace, ignore_errors=True)
+                if not palace.exists():
+                    aside.replace(palace)
+                    raise BackupError(
+                        f"restore failed and was rolled back; your palace is intact: {e}"
+                    ) from e
+                raise BackupError(
+                    f"restore failed; your previous palace is preserved at {aside}: {e}"
+                ) from e
+            raise BackupError(f"restore failed: {e}") from e
 
         # Defensive: clear any sidecars so a stale -wal cannot corrupt the db.
         for suffix in _EXCLUDED_SUFFIXES:
             (palace / ("chroma.sqlite3" + suffix)).unlink(missing_ok=True)
 
-        # Place the KG where the runtime expects it for this layout.
+        # Place the KG in BOTH plausible runtime locations (config_dir and
+        # palace) when they differ, since the server resolves the KG path from
+        # whether it was launched with --palace, not from where files exist.
+        # Writing both guarantees the restored graph is visible either way.
         kg_member = tmp / "knowledge_graph.sqlite3"
         kg_restored = False
         if kg_member.exists():
-            relocated = palace.resolve(strict=False) != (config_dir / "palace").resolve(
-                strict=False
-            )
-            kg_target = (palace if relocated else config_dir) / "knowledge_graph.sqlite3"
-            kg_target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(kg_member, kg_target)
+            targets = {
+                (config_dir / "knowledge_graph.sqlite3").resolve(strict=False),
+                (palace / "knowledge_graph.sqlite3").resolve(strict=False),
+            }
+            for kg_target in targets:
+                kg_target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(kg_member, kg_target)
             kg_restored = True
 
         restored_files = sum(1 for p in palace.rglob("*") if p.is_file())
