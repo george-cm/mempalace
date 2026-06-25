@@ -775,6 +775,58 @@ def cmd_backup(args):
     print("  Backup complete.")
 
 
+def cmd_backup_verify(args):
+    """Verify a backup archive against its manifest (sizes, sha256, integrity)."""
+    from .backup import BackupError, verify_backup
+
+    try:
+        result = verify_backup(os.path.expanduser(args.archive))
+    except (BackupError, OSError) as e:
+        print(f"  VERIFY FAILED: {e}")
+        sys.exit(1)
+
+    if result.ok:
+        print(f"  OK — {result.file_count} files verified, all sha256/integrity checks passed.")
+        return
+    print(f"  CORRUPT — {len(result.errors)} problem(s) in {result.file_count} files:")
+    for err in result.errors:
+        print(f"    - {err}")
+    sys.exit(1)
+
+
+def cmd_restore(args):
+    """Restore a palace from a backup archive."""
+    from .backup import BackupError, restore_archive
+
+    config_dir = (
+        os.path.expanduser(args.config_dir)
+        if args.config_dir
+        else os.path.expanduser("~/.mempalace")
+    )
+    palace_path = os.path.expanduser(args.palace) if args.palace else None
+
+    print(f"  Restoring {args.archive} into {config_dir}")
+    print("  Stop the MCP server / any process using the palace before continuing.")
+    try:
+        result = restore_archive(
+            os.path.expanduser(args.archive),
+            config_dir,
+            palace_path=palace_path,
+            force=args.force,
+        )
+    except (BackupError, OSError) as e:
+        print(f"  RESTORE FAILED: {e}")
+        sys.exit(1)
+
+    print(f"  Restored {result.restored_files} files to {result.palace_path}")
+    if result.moved_aside:
+        print(f"  Previous palace moved aside to: {result.moved_aside}")
+    if not result.kg_restored:
+        print("  NOTE: archive contained no knowledge graph.")
+    print(f"  NEXT: run `mempalace repair --palace {result.palace_path}` to rebuild the index.")
+    print("  Restore complete.")
+
+
 def cmd_repair(args):
     """Rebuild palace vector index from SQLite metadata."""
     import shutil
@@ -1570,6 +1622,35 @@ def main():
         help="Override the palace data dir (default: configured palace_path)",
     )
 
+    # backup-verify — check an archive against its manifest
+    p_verify = sub.add_parser(
+        "backup-verify",
+        help="Verify a backup archive (sizes, sha256, recorded integrity checks)",
+    )
+    p_verify.add_argument("archive", help="Path to a mempalace-backup-*.zip archive")
+
+    # restore — rebuild a palace from a backup archive
+    p_restore = sub.add_parser(
+        "restore",
+        help="Restore a palace from a backup archive (verifies first)",
+    )
+    p_restore.add_argument("archive", help="Path to a mempalace-backup-*.zip archive")
+    p_restore.add_argument(
+        "--config-dir",
+        default=None,
+        help="Config dir to restore into (default: ~/.mempalace)",
+    )
+    p_restore.add_argument(
+        "--palace",
+        default=None,
+        help="Override the palace data dir (default: <config-dir>/palace)",
+    )
+    p_restore.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite a non-empty palace (the existing one is moved aside, not deleted)",
+    )
+
     args = parser.parse_args()
 
     if not args.command:
@@ -1608,6 +1689,8 @@ def main():
         "migrate": cmd_migrate,
         "status": cmd_status,
         "backup": cmd_backup,
+        "backup-verify": cmd_backup_verify,
+        "restore": cmd_restore,
     }
     dispatch[args.command](args)
 

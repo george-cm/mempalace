@@ -162,6 +162,36 @@ index from the restored `chroma.sqlite3` (the source of truth). See
 [`tools/BACKUP.md`](https://github.com/george-cm/mempalace/blob/main/tools/BACKUP.md)
 for the full procedure and the optional scheduled-backup tooling.
 
+## `mempalace backup-verify`
+
+Verify a backup archive against its `MANIFEST.json`: per-file size and SHA-256,
+plus the recorded SQLite integrity results. Exits non-zero if anything is off.
+
+```bash
+mempalace backup-verify D:\Backups\MemPalace\mempalace-backup-20260101T000000Z.zip
+```
+
+## `mempalace restore`
+
+Restore a palace from a backup archive. Verifies the archive first (refusing a
+tampered one), refuses to overwrite a non-empty palace unless `--force` (the
+existing palace is moved aside, not deleted), lays down the verbatim store + KG
++ config, and clears stale `-wal`/`-shm` sidecars.
+
+```bash
+mempalace restore <archive>.zip
+mempalace restore <archive>.zip --config-dir ~/.mempalace --force
+```
+
+| Option | Description |
+|--------|-------------|
+| `--config-dir DIR` | Config dir to restore into (default: `~/.mempalace`). |
+| `--palace DIR` | Override the palace data dir (default: `<config-dir>/palace`). |
+| `--force` | Overwrite a non-empty palace (moved aside, not deleted). |
+
+After restoring, run `mempalace repair` to rebuild the HNSW index from the
+restored `chroma.sqlite3`.
+
 ## `mempalace mcp`
 
 Helper command that outputs setup syntax (like `claude mcp add...`) to connect MemPalace to your AI client, automatically handling paths.

@@ -531,3 +531,179 @@ def test_dest_inside_palace_rejected_case_insensitively(tmp_path):
 
     with pytest.raises(BackupError):
         create_backup(cfg, [mixed])
+
+
+# ── Round 3: verify + restore (closing the restore-ability gap) ────────────
+
+
+def _tamper_zip_member(archive: Path, member: str, new_bytes: bytes) -> None:
+    """Rewrite ``archive`` replacing ``member``'s content (corrupting it)."""
+    import io
+
+    with zipfile.ZipFile(archive) as zf:
+        items = {n: zf.read(n) for n in zf.namelist()}
+    items[member] = new_bytes
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, data in items.items():
+            zf.writestr(name, data)
+    archive.write_bytes(buf.getvalue())
+
+
+def test_verify_passes_on_a_good_archive(tmp_path):
+    """verify_backup reports ok with no errors for a freshly created archive."""
+    from mempalace.backup import create_backup, verify_backup
+
+    cfg = _build_config_dir(tmp_path / "home")
+    dest = tmp_path / "dest"
+    create_backup(cfg, [dest])
+
+    result = verify_backup(_archives(dest)[0])
+    assert result.ok is True
+    assert result.errors == []
+    assert result.file_count > 0
+
+
+def test_verify_detects_tampered_payload(tmp_path):
+    """A byte changed inside the archive must fail sha256 verification."""
+    from mempalace.backup import create_backup, verify_backup
+
+    cfg = _build_config_dir(tmp_path / "home")
+    dest = tmp_path / "dest"
+    create_backup(cfg, [dest])
+    archive = _archives(dest)[0]
+
+    _tamper_zip_member(archive, "config.json", b'{"palace_path": "HACKED"}')
+
+    result = verify_backup(archive)
+    assert result.ok is False
+    assert any("config.json" in e for e in result.errors)
+
+
+def test_verify_fails_on_missing_manifest(tmp_path):
+    """An archive without MANIFEST.json cannot be verified."""
+    from mempalace.backup import BackupError, verify_backup
+
+    bogus = tmp_path / "mempalace-backup-20260101T000000Z.zip"
+    with zipfile.ZipFile(bogus, "w") as zf:
+        zf.writestr("config.json", "{}")
+
+    with pytest.raises(BackupError):
+        verify_backup(bogus)
+
+
+def test_restore_lays_down_a_working_palace(tmp_path):
+    """restore_archive recreates chroma + KG + config from an archive."""
+    from mempalace.backup import create_backup, restore_archive
+
+    cfg = _build_config_dir(tmp_path / "home")
+    dest = tmp_path / "dest"
+    create_backup(cfg, [dest])
+    archive = _archives(dest)[0]
+
+    target = tmp_path / "restored"
+    result = restore_archive(archive, target)
+
+    assert (target / "palace" / "chroma.sqlite3").exists()
+    assert (target / "knowledge_graph.sqlite3").exists()
+    assert (target / "config.json").exists()
+    chroma_rows = _rows((target / "palace" / "chroma.sqlite3").read_bytes(), tmp_path)
+    assert "drawer one" in chroma_rows
+    assert result.palace_path == str(target / "palace")
+
+
+def test_restore_refuses_nonempty_palace_without_force(tmp_path):
+    """Restoring over an existing palace must require explicit --force."""
+    from mempalace.backup import BackupError, create_backup, restore_archive
+
+    cfg = _build_config_dir(tmp_path / "home")
+    dest = tmp_path / "dest"
+    create_backup(cfg, [dest])
+    archive = _archives(dest)[0]
+
+    target = tmp_path / "restored"
+    (target / "palace").mkdir(parents=True)
+    (target / "palace" / "chroma.sqlite3").write_bytes(b"existing precious data")
+
+    with pytest.raises(BackupError):
+        restore_archive(archive, target)
+
+    # The existing data is untouched by the refused restore.
+    assert (target / "palace" / "chroma.sqlite3").read_bytes() == b"existing precious data"
+
+
+def test_restore_removes_stale_sidecars(tmp_path):
+    """A leftover -wal/-shm in the target must be cleared on restore.
+
+    A stale live -wal next to the restored chroma.sqlite3 would corrupt it.
+    """
+    from mempalace.backup import create_backup, restore_archive
+
+    cfg = _build_config_dir(tmp_path / "home")
+    dest = tmp_path / "dest"
+    create_backup(cfg, [dest])
+    archive = _archives(dest)[0]
+
+    target = tmp_path / "restored"
+    (target / "palace").mkdir(parents=True)
+    (target / "palace" / "chroma.sqlite3-wal").write_bytes(b"stale wal")
+    (target / "palace" / "chroma.sqlite3-shm").write_bytes(b"stale shm")
+
+    restore_archive(archive, target, force=True)
+
+    assert not (target / "palace" / "chroma.sqlite3-wal").exists()
+    assert not (target / "palace" / "chroma.sqlite3-shm").exists()
+
+
+def test_restore_rejects_a_tampered_archive(tmp_path):
+    """Restore must verify integrity first and refuse a corrupt archive."""
+    from mempalace.backup import BackupError, create_backup, restore_archive
+
+    cfg = _build_config_dir(tmp_path / "home")
+    dest = tmp_path / "dest"
+    create_backup(cfg, [dest])
+    archive = _archives(dest)[0]
+    _tamper_zip_member(archive, "config.json", b"corrupted")
+
+    target = tmp_path / "restored"
+    with pytest.raises(BackupError):
+        restore_archive(archive, target)
+    assert not target.exists() or not (target / "palace" / "chroma.sqlite3").exists()
+
+
+def test_cli_backup_verify_command(tmp_path):
+    """`mempalace backup-verify` exits 0 on a good archive."""
+    from argparse import Namespace
+
+    from mempalace.backup import create_backup
+    from mempalace.cli import cmd_backup_verify
+
+    cfg = _build_config_dir(tmp_path / "home")
+    dest = tmp_path / "dest"
+    create_backup(cfg, [dest])
+
+    # Returns normally (no SystemExit) for a sound archive.
+    cmd_backup_verify(Namespace(archive=str(_archives(dest)[0])))
+
+
+def test_cli_restore_command_round_trips(tmp_path):
+    """`mempalace restore` lays a working palace down via the CLI handler."""
+    from argparse import Namespace
+
+    from mempalace.backup import create_backup
+    from mempalace.cli import cmd_restore
+
+    cfg = _build_config_dir(tmp_path / "home")
+    dest = tmp_path / "dest"
+    create_backup(cfg, [dest])
+
+    target = tmp_path / "restored"
+    cmd_restore(
+        Namespace(
+            archive=str(_archives(dest)[0]),
+            config_dir=str(target),
+            palace=None,
+            force=False,
+        )
+    )
+    assert (target / "palace" / "chroma.sqlite3").exists()

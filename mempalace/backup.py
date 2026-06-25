@@ -416,4 +416,154 @@ def create_backup(
     )
 
 
-__all__ = ["create_backup", "BackupResult", "BackupError"]
+@dataclass
+class VerifyResult:
+    """Outcome of :func:`verify_backup`."""
+
+    ok: bool
+    errors: list[str]
+    file_count: int
+
+
+@dataclass
+class RestoreResult:
+    """Outcome of :func:`restore_archive`."""
+
+    config_dir: str
+    palace_path: str
+    restored_files: int
+    kg_restored: bool
+    moved_aside: "str | None" = None
+
+
+def verify_backup(archive_path) -> VerifyResult:
+    """Check an archive against its MANIFEST: per-file size+sha256 and the
+    recorded SQLite integrity results.
+
+    Raises:
+        BackupError: if the file is not a readable zip or lacks a MANIFEST.
+    """
+    archive_path = Path(archive_path)
+    errors: list[str] = []
+    try:
+        with zipfile.ZipFile(archive_path) as zf:
+            names = set(zf.namelist())
+            if "MANIFEST.json" not in names:
+                raise BackupError(f"{archive_path} has no MANIFEST.json — not a MemPalace backup")
+            manifest = json.loads(zf.read("MANIFEST.json"))
+            files = manifest.get("files", [])
+            for entry in files:
+                rel = entry["path"]
+                if rel not in names:
+                    errors.append(f"{rel}: listed in manifest but missing from archive")
+                    continue
+                data = zf.read(rel)
+                if len(data) != entry.get("size"):
+                    errors.append(
+                        f"{rel}: size mismatch (manifest {entry.get('size')}, got {len(data)})"
+                    )
+                if hashlib.sha256(data).hexdigest() != entry.get("sha256"):
+                    errors.append(f"{rel}: sha256 mismatch (content altered)")
+            for db, res in manifest.get("sqlite_checks", {}).items():
+                if res != "ok":
+                    errors.append(f"{db}: recorded integrity check was {res!r}, not 'ok'")
+    except zipfile.BadZipFile as e:
+        raise BackupError(f"{archive_path} is not a valid zip archive: {e}") from e
+
+    return VerifyResult(ok=not errors, errors=errors, file_count=len(files))
+
+
+def restore_archive(archive_path, config_dir, *, palace_path=None, force=False) -> RestoreResult:
+    """Restore a palace from a backup archive into ``config_dir``.
+
+    Verifies the archive first (refusing a tampered one), refuses to clobber a
+    non-empty palace unless ``force`` is set (moving the old palace aside rather
+    than deleting it), lays down the verbatim store + KG + config, and clears
+    any stale ``-wal``/``-shm``/``-journal`` sidecars that would corrupt the
+    restored database.
+
+    NOTE: the archived HNSW index is advisory; after restore, run
+    ``mempalace repair`` to regenerate it from the restored ``chroma.sqlite3``.
+    """
+    archive_path = Path(archive_path)
+    config_dir = Path(config_dir)
+    palace = Path(palace_path) if palace_path else config_dir / "palace"
+
+    verdict = verify_backup(archive_path)
+    if not verdict.ok:
+        raise BackupError(
+            f"refusing to restore — archive failed verification: {'; '.join(verdict.errors)}"
+        )
+
+    palace_nonempty = palace.exists() and any(palace.iterdir())
+    if palace_nonempty and not force:
+        raise BackupError(
+            f"target palace {palace} is not empty; pass force=True to overwrite "
+            "(the existing palace will be moved aside, not deleted)"
+        )
+
+    with tempfile.TemporaryDirectory(prefix="mempalace_restore_") as tmp:
+        tmp = Path(tmp)
+        with zipfile.ZipFile(archive_path) as zf:
+            zf.extractall(tmp)
+
+        config_dir.mkdir(parents=True, exist_ok=True)
+
+        # Move an existing palace aside (never destroy) before laying the new one.
+        moved_aside: "str | None" = None
+        if palace_nonempty:
+            stamp = _utc_stamp(None)
+            aside = palace.with_name(palace.name + f".pre-restore-{stamp}")
+            palace.replace(aside)
+            moved_aside = str(aside)
+
+        shutil.copytree(tmp / "palace", palace, dirs_exist_ok=True)
+
+        # Defensive: clear any sidecars so a stale -wal cannot corrupt the db.
+        for suffix in _EXCLUDED_SUFFIXES:
+            (palace / ("chroma.sqlite3" + suffix)).unlink(missing_ok=True)
+
+        # Place the KG where the runtime expects it for this layout.
+        kg_member = tmp / "knowledge_graph.sqlite3"
+        kg_restored = False
+        if kg_member.exists():
+            relocated = palace.resolve(strict=False) != (config_dir / "palace").resolve(
+                strict=False
+            )
+            kg_target = (palace if relocated else config_dir) / "knowledge_graph.sqlite3"
+            kg_target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(kg_member, kg_target)
+            kg_restored = True
+
+        restored_files = sum(1 for p in palace.rglob("*") if p.is_file())
+
+        for name in _CONFIG_FILES:
+            member = tmp / name
+            if member.exists():
+                shutil.copy2(member, config_dir / name)
+                restored_files += 1
+
+        wal_member = tmp / "wal" / "write_log.jsonl"
+        if wal_member.exists():
+            (config_dir / "wal").mkdir(exist_ok=True)
+            shutil.copy2(wal_member, config_dir / "wal" / "write_log.jsonl")
+            restored_files += 1
+
+    return RestoreResult(
+        config_dir=str(config_dir),
+        palace_path=str(palace),
+        restored_files=restored_files,
+        kg_restored=kg_restored,
+        moved_aside=moved_aside,
+    )
+
+
+__all__ = [
+    "create_backup",
+    "verify_backup",
+    "restore_archive",
+    "BackupResult",
+    "VerifyResult",
+    "RestoreResult",
+    "BackupError",
+]
