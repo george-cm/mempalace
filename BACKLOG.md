@@ -20,6 +20,19 @@ deliberate session (close Devin first; `reset --hard sync/upstream-v3.5.0` + `--
 reinstall editable tool; smoke-test; rollback via backup). See plan + filled-in Decisions:
 `C:\Users\George.Murga\.config\mempalace-sync\2026-06-25-upstream-sync-plan.md`.
 
+**Remaining to do (Phase D cutover — do in a deliberate session, not mid-Devin-work):**
+- [ ] Fresh `mempalace backup --out C:\Users\George.Murga\Backups\MemPalace --keep 14` + `backup-verify`.
+- [ ] Close Devin / MCP server (release palace locks).
+- [ ] LIVE palace migrations: `mempalace palace set-embedder --model minilm`; then `mempalace repair`.
+- [ ] `git checkout main` → `git reset --hard sync/upstream-v3.5.0` → `git push fork main --force-with-lease`.
+- [ ] `uv tool install -e . --force` (→ v3.5.0); confirm `mempalace --help` lists backup/backup-verify/restore.
+- [ ] Smoke-test: `mempalace status`, `mempalace search "scp -O NAS"`; restart Devin, confirm hook fires.
+- [ ] Rollback if needed: restore backup + repair; `git reset --hard 812eefe` + force-push; reinstall tool.
+
+**Remaining follow-up (non-blocking):**
+- [ ] PR the backup/verify/restore feature to upstream (it has no backup command).
+- [ ] Evaluate upstream's new MCP tools (`mempalace_checkpoint`, `mempalace_mine`, `delete_by_source`).
+
 The fork is ~525 commits behind upstream `milla-jovovich/mempalace` (diverged at v3.3.5,
 merge-base `d0163a7`; upstream now at **v3.5.0** = `2c08bb2`; fork main = `812eefe`).
 Upstream has shipped pluggable vector backends (pgvector/qdrant/sqlite_exact + RFC 001
