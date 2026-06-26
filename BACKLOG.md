@@ -4,8 +4,21 @@
 
 ## OPEN: TASK-001 — Sync fork to upstream v3.5.0 (and PR the backup feature upstream)
 
-**Type:** Task  **Status:** OPEN  **Reported:** 2026-06-25
+**Type:** Task  **Status:** READY-TO-CUTOVER  **Reported:** 2026-06-25  **Validated:** 2026-06-26
 **Affects:** whole repo (george-cm fork)
+
+**UPDATE 2026-06-26 — Phase 0/A/B done; validated branch ready, cutover deferred.**
+A validated branch `sync/upstream-v3.5.0` (off upstream `v3.5.0` = `2c08bb2`) exists locally and on
+the fork. It re-applies the backup feature, **re-adds the fork-only `devin` harness** (upstream
+v3.5.0 only has `claude-code`/`codex` — a blind cutover would break Devin auto-save), and the
+personal config (bash test fix, conftest `tmp_path`, `.gitignore .worktrees`, AGENTS TDD rule).
+Validation against a *restored copy* of the live palace: v3.5.0 **reads it and search works** (no
+hard blocker); backup tests 33 pass, hooks/backup 167 pass, full suite 2871 pass. Two NON-blocking
+migrations to run on the LIVE palace **at cutover**: `mempalace palace set-embedder --model minilm`
+and `mempalace repair` (rebuild index w/ cosine). **Cutover (Phase D) NOT yet done** — deferred to a
+deliberate session (close Devin first; `reset --hard sync/upstream-v3.5.0` + `--force-with-lease`;
+reinstall editable tool; smoke-test; rollback via backup). See plan + filled-in Decisions:
+`C:\Users\George.Murga\.config\mempalace-sync\2026-06-25-upstream-sync-plan.md`.
 
 The fork is ~525 commits behind upstream `milla-jovovich/mempalace` (diverged at v3.3.5,
 merge-base `d0163a7`; upstream now at **v3.5.0** = `2c08bb2`; fork main = `812eefe`).
