@@ -906,7 +906,7 @@ def _ingest_transcript(transcript_path: str):
         _log(f"transcript ingest hook failed: {exc}")
 
 
-SUPPORTED_HARNESSES = {"claude-code", "codex"}
+SUPPORTED_HARNESSES = {"claude-code", "codex", "devin"}
 
 
 def _diary_agent_for_harness(harness: str) -> str:
@@ -928,8 +928,9 @@ def _parse_harness_input(data: dict, harness: str) -> dict:
     if harness not in SUPPORTED_HARNESSES:
         print(f"Unknown harness: {harness}", file=sys.stderr)
         sys.exit(1)
+    default_session = "devin" if harness == "devin" else "unknown"
     return {
-        "session_id": _sanitize_session_id(str(data.get("session_id", "unknown"))),
+        "session_id": _sanitize_session_id(str(data.get("session_id", default_session))),
         "stop_hook_active": data.get("stop_hook_active", False),
         "transcript_path": str(data.get("transcript_path", "")),
     }
