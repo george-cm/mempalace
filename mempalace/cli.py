@@ -1090,6 +1090,96 @@ def cmd_repair_status(args):
     repair_status(palace_path=palace_path)
 
 
+def cmd_backup(args):
+    """Create a SQLite-safe, full-fidelity backup archive of the palace."""
+    from .backup import BackupError, create_backup
+
+    config_dir = (
+        os.path.expanduser(args.config_dir)
+        if args.config_dir
+        else os.path.expanduser("~/.mempalace")
+    )
+    palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
+    dests = [os.path.expanduser(d) for d in (args.out or [])]
+    if not dests:
+        print("  ERROR: at least one --out <dir> is required.")
+        sys.exit(2)
+
+    print(f"  Backing up palace at {palace_path}")
+    try:
+        result = create_backup(
+            config_dir,
+            dests,
+            palace_path=palace_path,
+            keep=args.keep,
+        )
+    except (BackupError, OSError) as e:
+        print(f"  BACKUP FAILED: {e}")
+        sys.exit(1)
+
+    size_mb = result.size_bytes / 1e6
+    print(f"  Archive: {result.archive_name} ({size_mb:.1f} MB, {result.file_count} files)")
+    if not result.kg_included:
+        print("  NOTE: no knowledge_graph.sqlite3 found — graph NOT included in this backup.")
+    for path in result.dest_paths:
+        print(f"    -> {path}")
+    if result.pruned:
+        print(f"  Pruned {len(result.pruned)} old archive(s) per --keep {args.keep}.")
+    print("  Backup complete.")
+
+
+def cmd_backup_verify(args):
+    """Verify a backup archive against its manifest (sizes, sha256, integrity)."""
+    from .backup import BackupError, verify_backup
+
+    try:
+        result = verify_backup(os.path.expanduser(args.archive))
+    except (BackupError, OSError) as e:
+        print(f"  VERIFY FAILED: {e}")
+        sys.exit(1)
+
+    if result.ok:
+        print(f"  OK — {result.file_count} files verified, all sha256/integrity checks passed.")
+        return
+    print(f"  CORRUPT — {len(result.errors)} problem(s) in {result.file_count} files:")
+    for err in result.errors:
+        print(f"    - {err}")
+    sys.exit(1)
+
+
+def cmd_restore(args):
+    """Restore a palace from a backup archive."""
+    from .backup import BackupError, restore_archive
+
+    config_dir = (
+        os.path.expanduser(args.config_dir)
+        if args.config_dir
+        else os.path.expanduser("~/.mempalace")
+    )
+    palace_path = os.path.expanduser(args.palace) if args.palace else None
+
+    print(f"  Restoring {args.archive} into {config_dir}")
+    print("  Stop the MCP server / any process using the palace before continuing.")
+    try:
+        result = restore_archive(
+            os.path.expanduser(args.archive),
+            config_dir,
+            palace_path=palace_path,
+            force=args.force,
+        )
+    except (BackupError, OSError) as e:
+        print(f"  RESTORE FAILED: {e}")
+        sys.exit(1)
+
+    print(f"  Restored {result.restored_files} files to {result.palace_path}")
+    if result.moved_aside:
+        print(f"  Previous palace moved aside to: {result.moved_aside}")
+    if not result.kg_restored:
+        print("  NOTE: archive contained no knowledge graph.")
+    print(f"  NEXT: run `mempalace repair --palace {result.palace_path}` to rebuild the index.")
+    print("  Restore complete.")
+
+
 def cmd_repair(args):
     """Rebuild palace vector index from SQLite metadata.
 
@@ -2224,6 +2314,64 @@ def main():
         help="Storage backend (default: config/env/detected/chroma)",
     )
 
+    # backup — SQLite-safe full-fidelity archive of the whole palace
+    p_backup = sub.add_parser(
+        "backup",
+        help="Create a SQLite-safe backup archive of the palace (drawers + KG + config)",
+    )
+    p_backup.add_argument(
+        "--out",
+        action="append",
+        metavar="DIR",
+        help="Destination directory for the archive (repeatable for multiple copies)",
+    )
+    p_backup.add_argument(
+        "--keep",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Retain only the N newest archives per destination (prune older)",
+    )
+    p_backup.add_argument(
+        "--config-dir",
+        default=None,
+        help="MemPalace config dir to back up (default: ~/.mempalace)",
+    )
+    p_backup.add_argument(
+        "--palace",
+        default=None,
+        help="Override the palace data dir (default: configured palace_path)",
+    )
+
+    # backup-verify — check an archive against its manifest
+    p_verify = sub.add_parser(
+        "backup-verify",
+        help="Verify a backup archive (sizes, sha256, recorded integrity checks)",
+    )
+    p_verify.add_argument("archive", help="Path to a mempalace-backup-*.zip archive")
+
+    # restore — rebuild a palace from a backup archive
+    p_restore = sub.add_parser(
+        "restore",
+        help="Restore a palace from a backup archive (verifies first)",
+    )
+    p_restore.add_argument("archive", help="Path to a mempalace-backup-*.zip archive")
+    p_restore.add_argument(
+        "--config-dir",
+        default=None,
+        help="Config dir to restore into (default: ~/.mempalace)",
+    )
+    p_restore.add_argument(
+        "--palace",
+        default=None,
+        help="Override the palace data dir (default: <config-dir>/palace)",
+    )
+    p_restore.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite a non-empty palace (the existing one is moved aside, not deleted)",
+    )
+
     args = parser.parse_args()
     _apply_backend_arg(args)
 
@@ -2279,6 +2427,9 @@ def main():
         "migrate-wings": cmd_migrate_wings,
         "hallways": cmd_hallways,
         "status": cmd_status,
+        "backup": cmd_backup,
+        "backup-verify": cmd_backup_verify,
+        "restore": cmd_restore,
     }
     dispatch[args.command](args)
 
