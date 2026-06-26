@@ -9,11 +9,40 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_HOOKS_DIR = REPO_ROOT / ".claude-plugin" / "hooks"
-BASH = shutil.which("bash")
+
+
+def _find_posix_bash() -> "str | None":
+    """Return a POSIX bash that shares the Windows filesystem, or None.
+
+    ``shutil.which('bash')`` on Windows often resolves to the WSL launcher
+    (``C:\\Windows\\System32\\bash.exe``) or a WindowsApps stub, which run in a
+    Linux filesystem and cannot open the Windows-style ``C:\\...`` paths these
+    tests pass. Prefer a real bash on PATH (Git Bash / w64devkit); skip the
+    WSL/WindowsApps stubs.
+    """
+    names = ("bash.exe", "bash")
+    for directory in os.environ.get("PATH", "").split(os.pathsep):
+        if not directory:
+            continue
+        for name in names:
+            candidate = Path(directory) / name
+            if not candidate.is_file():
+                continue
+            lowered = str(candidate).lower()
+            if "system32" in lowered or "windowsapps" in lowered:
+                continue
+            return str(candidate)
+    found = shutil.which("bash")
+    if found and "system32" not in found.lower() and "windowsapps" not in found.lower():
+        return found
+    return None
+
+
+BASH = _find_posix_bash()
 
 pytestmark = pytest.mark.skipif(
     BASH is None,
-    reason="bash required for Claude plugin hook wrapper tests",
+    reason="a non-WSL POSIX bash (e.g. Git Bash) is required for plugin hook wrapper tests",
 )
 
 SCRIPT_CASES = [

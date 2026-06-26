@@ -10,13 +10,34 @@ mempalace imports — so that module-level initialisations (e.g.
 instead of the real user profile.
 """
 
+import gc
 import os
 import shutil
 import tempfile
+import time
 
 # ── Isolate HOME before any mempalace imports ──────────────────────────
 _original_env = {}
+# Created at import time (before mempalace imports) so it cannot use pytest's
+# tmp_path_factory; cleaned best-effort with retries in _isolate_home below.
 _session_tmp = tempfile.mkdtemp(prefix="mempalace_session_")
+
+
+def _robust_rmtree(path: str, attempts: int = 5) -> None:
+    """Remove a tree, retrying so Windows ChromaDB/SQLite file locks that are
+    still settling at teardown don't permanently leak the directory.
+    """
+    for i in range(attempts):
+        try:
+            shutil.rmtree(path)
+            return
+        except FileNotFoundError:
+            return
+        except OSError:
+            gc.collect()
+            time.sleep(0.2 * (i + 1))
+    shutil.rmtree(path, ignore_errors=True)
+
 
 for _var in ("HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH"):
     _original_env[_var] = os.environ.get(_var)
@@ -150,15 +171,19 @@ def _isolate_home():
             os.environ.pop(var, None)
         else:
             os.environ[var] = orig
-    shutil.rmtree(_session_tmp, ignore_errors=True)
+    _robust_rmtree(_session_tmp)
 
 
 @pytest.fixture
-def tmp_dir():
-    """Create and auto-cleanup a temporary directory."""
-    d = tempfile.mkdtemp(prefix="mempalace_test_")
-    yield d
-    shutil.rmtree(d, ignore_errors=True)
+def tmp_dir(tmp_path):
+    """A temporary directory, managed by pytest.
+
+    Delegates to pytest's built-in ``tmp_path`` rather than a raw ``mkdtemp``:
+    pytest prunes these to the last few runs and removes older runs at the
+    start of the next session (when no test process holds ChromaDB/SQLite
+    locks), so they no longer leak unboundedly on Windows.
+    """
+    return str(tmp_path)
 
 
 @pytest.fixture
